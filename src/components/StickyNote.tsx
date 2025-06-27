@@ -2,6 +2,12 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { X, Edit2, Check } from "lucide-react";
 import { motion } from "framer-motion";
 import { DrawingTool } from "./Toolbar";
+import { getAuth } from "firebase/auth"; // 🔄
+import { db } from "../firebase";     // 🔄 your firebase config
+import { doc, setDoc } from "firebase/firestore"; // 🔄
+import debounce from "lodash.debounce"; // 🔄
+import { getDoc, onSnapshot } from "firebase/firestore";
+
 
 interface Position {
   x: number;
@@ -25,6 +31,16 @@ interface Shape {
   strokeWidth: number;
 }
 
+interface StickyNoteData {
+  id: string;
+  position: Position;
+  color: string;
+  content: string;
+  drawingPaths: DrawingPath[];
+  shapes: Shape[];
+  timestamp: Date;
+}
+
 interface StickyNoteProps {
   id: string;
   initialX?: number;
@@ -41,54 +57,116 @@ interface StickyNoteProps {
   style?: React.CSSProperties;
 }
 
-const StickyNote: React.FC<StickyNoteProps> = ({
-  id,
-  initialX = 100,
-  initialY = 100,
-  initialColor = "#FFEB3B",
-  initialContent = "Add your note here...",
-  onDelete = () => {},
-  onContentChange = () => {},
-  onPositionChange = () => {},
-  onSelect = () => {},
-  isSelected = false,
-  selectedTool = "select",
-  drawingColor = "#000000",
-  style = {},
-}) => {
-  const [position, setPosition] = useState({ x: initialX, y: initialY });
-  const [isDragging, setIsDragging] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-  const [content, setContent] = useState(initialContent);
-  const [color, setColor] = useState(initialColor);
-  const [drawingPaths, setDrawingPaths] = useState<DrawingPath[]>([]);
-  const [shapes, setShapes] = useState<Shape[]>([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [currentPath, setCurrentPath] = useState<Position[]>([]);
-  const [currentShape, setCurrentShape] = useState<Shape | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const noteRef = useRef<HTMLDivElement>(null);
+  const StickyNote: React.FC<StickyNoteProps> = ({
+    id,
+    initialX = 100,
+    initialY = 100,
+    initialColor = "#FFEB3B",
+    initialContent = "Add your note here...",
+    onDelete = () => {},
+    onContentChange = () => {},
+    onPositionChange = () => {},
+    onSelect = () => {},
+    isSelected = false,
+    selectedTool = "select",
+    drawingColor = "#000000",
+    style = {},
+  }) => {
+    const [position, setPosition] = useState({ x: initialX, y: initialY });
+    const [isDragging, setIsDragging] = useState(false);
+    const [isEditing, setIsEditing] = useState(false);
+    const [content, setContent] = useState(initialContent);
+    const [color, setColor] = useState(initialColor);
+    const [drawingPaths, setDrawingPaths] = useState<DrawingPath[]>([]);
+    const [shapes, setShapes] = useState<Shape[]>([]);
+    const [isDrawing, setIsDrawing] = useState(false);
+    const [currentPath, setCurrentPath] = useState<Position[]>([]);
+    const [currentShape, setCurrentShape] = useState<Shape | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const noteRef = useRef<HTMLDivElement>(null);
+    const firstLoad = useRef(true);
+    const hasUnsavedChanges = useRef(false);
 
-  // Focus textarea when editing starts
-  useEffect(() => {
-    if (isEditing && textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, [isEditing]);
+  // Firestore save functions
+    const saveNoteToFirestore = useCallback(async () => {
+      const auth = getAuth();
+      const user = auth.currentUser;
+      if (!user) return;
 
-  const handleDragEnd = (event: any, info: any) => {
-    setIsDragging(false);
-    // Calculate the final position based on the drag offset
-    const finalX = position.x + info.offset.x;
-    const finalY = position.y + info.offset.y;
+      const noteData = {
+        content,
+        position,
+        color,
+        drawingPaths,
+        shapes,
+        timestamp: new Date(),
+      };
 
-    setPosition({
-      x: finalX,
-      y: finalY,
-    });
-    onPositionChange(id, finalX, finalY);
-  };
+      try {
+        await setDoc(doc(db, "users", user.uid, "stickyNotes", id), noteData);
+        hasUnsavedChanges.current = false;
+      } catch (error) {
+        console.error("Error saving note:", error);
+      }
+    }, [id, content, position, color, drawingPaths, shapes]);
+
+    const debouncedSave = useCallback(debounce(saveNoteToFirestore, 1000), [
+      saveNoteToFirestore,
+    ]);
+
+    // Load data from Firestore
+    useEffect(() => {
+      const auth = getAuth();
+      const user = auth.currentUser;
+      if (!user) return;
+
+      const noteRef = doc(db, "users", user.uid, "stickyNotes", id);
+      setIsLoading(true);
+
+      const unsubscribe = onSnapshot(noteRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          
+          // Only update state if this is first load OR there are no unsaved changes
+          if (firstLoad.current || !hasUnsavedChanges.current) {
+            setContent(data.content || initialContent);
+            setPosition(data.position || { x: initialX, y: initialY });
+            setColor(data.color || initialColor);
+            setDrawingPaths(data.drawingPaths || []);
+            setShapes(data.shapes || []);
+          }
+        }
+        
+        if (firstLoad.current) {
+          firstLoad.current = false;
+        }
+        
+        setIsLoading(false);
+      });
+
+      return () => {
+        unsubscribe();
+        debouncedSave.cancel();
+      };
+    }, [id, initialX, initialY, initialColor, initialContent, debouncedSave]);
+
+    // Auto-save when changes occur
+    useEffect(() => {
+      if (firstLoad.current) return;
+      hasUnsavedChanges.current = true;
+      debouncedSave();
+    }, [content, position, color, drawingPaths, shapes, debouncedSave]);
+
+    const handleDragEnd = (event: any, info: any) => {
+      setIsDragging(false);
+      const finalX = position.x + info.offset.x;
+      const finalY = position.y + info.offset.y;
+      
+      setPosition({ x: finalX, y: finalY });
+      onPositionChange(id, finalX, finalY);
+    };
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -104,10 +182,11 @@ const StickyNote: React.FC<StickyNoteProps> = ({
     setContent(e.target.value);
   };
 
-  const handleSave = () => {
-    setIsEditing(false);
-    onContentChange(id, content);
-  };
+    const handleSave = () => {
+        setIsEditing(false);
+        onContentChange(id, content);
+        saveNoteToFirestore(); // Ensure immediate save
+      };
 
   const handleNoteClick = (e: React.MouseEvent) => {
     if (selectedTool === "select") {

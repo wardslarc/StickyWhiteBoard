@@ -31,6 +31,10 @@ import {
 
 import { auth } from "../../firebase";
 
+import { doc, setDoc, getDoc } from "firebase/firestore";
+import { db } from "../../firebase"; // adjust path if needed
+
+
 export default function Home() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [signupOpen, setSignupOpen] = useState(false);
@@ -49,6 +53,20 @@ export default function Home() {
     try {
       const { email, password } = loginForm;
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+
+      const userRef = doc(db, "users", user.uid);
+      const userSnap = await getDoc(userRef);
+
+      if(!userSnap.exists()){
+        await setDoc(userRef, {
+            email:user.email,
+            lastLogin: new Date(),
+            uid:user.uid,
+        });
+      }else{
+        await setDoc(userRef, { lastLogin:new Date()}, { merge: true});
+      }
       console.log("Logged in user:", userCredential.user);
       setLoginOpen(false);
       navigate("/drawing", { replace: true });
@@ -63,10 +81,19 @@ export default function Home() {
 
     if(password !== confirmPassword){
       alert("Password do not match.");
+      return;
     }
 
     try{
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+
+      await setDoc(doc(db, "users", user.uid),{
+        email:user.email,
+        createdAt: new Date(),
+        uid: user.uid,
+      });
+      
       console.log("Signed up user:", userCredential.user);
       setSignupOpen(false);
       navigate("/drawing", { replace: true });
