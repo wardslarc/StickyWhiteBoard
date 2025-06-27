@@ -1,7 +1,9 @@
 import { Suspense } from "react";
 import { useRoutes, Routes, Route } from "react-router-dom";
-import Home from "./components/home";
+import Home from "./components/homepage/home";
 import routes from "tempo-routes";
+import WhiteBoard from "./components/home"
+import ProtectedRoute from "./components/ProtectedRoute";
 
 function App() {
   return (
@@ -9,6 +11,7 @@ function App() {
       <>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/drawing" element={<ProtectedRoute><WhiteBoard/></ProtectedRoute>}/>
         </Routes>
         {import.meta.env.VITE_TEMPO === "true" && useRoutes(routes)}
       </>
