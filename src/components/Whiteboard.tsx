@@ -2,62 +2,20 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import StickyNote from "./StickyNote";
 import Toolbar, { DrawingTool } from "./Toolbar";
 import { motion } from "framer-motion";
-
-interface Position {
-  x: number;
-  y: number;
-}
-
-export interface Note {
-  id: string;
-  content: string;
-  position: Position;
-  color: string;
-  zIndex: number;
-}
-
-interface DrawingPath {
-  id: string;
-  points: Position[];
-  color: string;
-  strokeWidth: number;
-  tool: DrawingTool;
-}
-
-interface Shape {
-  id: string;
-  type: "rectangle" | "circle";
-  startPos: Position;
-  endPos: Position;
-  color: string;
-  strokeWidth: number;
-}
+import { 
+  db, 
+  collection, 
+  onSnapshot, 
+  addDoc, 
+  doc, 
+  deleteDoc,
+  writeBatch
+} from "../firebase";
+import { DrawingPath, Shape, Note, Position } from "./whiteboardTypes";
 
 const Whiteboard = () => {
-  const [notes, setNotes] = useState<Note[]>([
-    {
-      id: "1",
-      content: "Welcome to the whiteboard! Drag me around.",
-      position: { x: 100, y: 100 },
-      color: "#ffcc80",
-      zIndex: 1,
-    },
-    {
-      id: "2",
-      content: "Double-click to edit text.",
-      position: { x: 400, y: 150 },
-      color: "#80deea",
-      zIndex: 2,
-    },
-    {
-      id: "3",
-      content: "Use the toolbar to add more notes!",
-      position: { x: 250, y: 300 },
-      color: "#ef9a9a",
-      zIndex: 3,
-    },
-  ]);
-  const [highestZIndex, setHighestZIndex] = useState<number>(3);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [highestZIndex, setHighestZIndex] = useState<number>(0);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState<DrawingTool>("select");
   const [drawingColor, setDrawingColor] = useState<string>("#000000");
@@ -68,20 +26,216 @@ const Whiteboard = () => {
   const [currentShape, setCurrentShape] = useState<Shape | null>(null);
   const whiteboardRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const eraserSelectionRef = useRef<{ paths: string[], shapes: string[] }>({ paths: [], shapes: [] });
 
-  const addNote = () => {
+  // Firebase collection references
+  const notesRef = collection(db, "notes");
+  const drawingPathsRef = collection(db, "drawingPaths");
+  const shapesRef = collection(db, "shapes");
+
+  // Load all whiteboard data from Firestore
+  useEffect(() => {
+    // Load notes
+    const notesUnsubscribe = onSnapshot(notesRef, (snapshot) => {
+      const notesData: Note[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        notesData.push({
+          id: doc.id,
+          content: data.content,
+          position: data.position,
+          color: data.color,
+          zIndex: data.zIndex,
+        });
+      });
+      setNotes(notesData);
+      
+      // Calculate highest zIndex
+      if (notesData.length > 0) {
+        const maxZIndex = Math.max(...notesData.map(note => note.zIndex));
+        setHighestZIndex(maxZIndex);
+      } else {
+        setHighestZIndex(0);
+      }
+    });
+
+    // Load drawing paths
+    const pathsUnsubscribe = onSnapshot(drawingPathsRef, (snapshot) => {
+      const pathsData: DrawingPath[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        pathsData.push({
+          id: doc.id,
+          points: data.points,
+          color: data.color,
+          strokeWidth: data.strokeWidth,
+          tool: data.tool,
+        });
+      });
+      setDrawingPaths(pathsData);
+    });
+
+    // Load shapes
+    const shapesUnsubscribe = onSnapshot(shapesRef, (snapshot) => {
+      const shapesData: Shape[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        shapesData.push({
+          id: doc.id,
+          type: data.type,
+          startPos: data.startPos,
+          endPos: data.endPos,
+          color: data.color,
+          strokeWidth: data.strokeWidth,
+        });
+      });
+      setShapes(shapesData);
+    });
+
+    return () => {
+      notesUnsubscribe();
+      pathsUnsubscribe();
+      shapesUnsubscribe();
+    };
+  }, []);
+
+  // Add a new sticky note
+  const addNote = async () => {
     const newZIndex = highestZIndex + 1;
-    const newNote: Note = {
-      id: Date.now().toString(),
+    const newNote = {
       content: "New note",
       position: { x: 50, y: 50 },
       color: "#ffcc80",
       zIndex: newZIndex,
     };
-    setNotes([...notes, newNote]);
-    setHighestZIndex(newZIndex);
+
+    try {
+      await addDoc(notesRef, newNote);
+    } catch (error) {
+      console.error("Error adding note:", error);
+    }
   };
 
+  // Delete a sticky note
+  const deleteNote = async (id: string) => {
+    try {
+      await deleteDoc(doc(notesRef, id));
+      if (selectedNoteId === id) {
+        setSelectedNoteId(null);
+      }
+    } catch (error) {
+      console.error("Error deleting note:", error);
+    }
+  };
+
+  // Add a new drawing path
+  const addDrawingPath = async (path: Omit<DrawingPath, 'id'>) => {
+    try {
+      await addDoc(drawingPathsRef, path);
+    } catch (error) {
+      console.error("Error adding drawing path:", error);
+    }
+  };
+
+  // Add a new shape
+  const addShape = async (shape: Omit<Shape, 'id'>) => {
+    try {
+      await addDoc(shapesRef, shape);
+    } catch (error) {
+      console.error("Error adding shape:", error);
+    }
+  };
+
+  // Delete drawing elements from Firebase
+  const deleteDrawingElements = async (paths: string[], shapes: string[]) => {
+    if (paths.length === 0 && shapes.length === 0) return;
+    
+    try {
+      const batch = writeBatch(db);
+      
+      // Add path deletions to batch
+      paths.forEach(pathId => {
+        const pathRef = doc(drawingPathsRef, pathId);
+        batch.delete(pathRef);
+      });
+      
+      // Add shape deletions to batch
+      shapes.forEach(shapeId => {
+        const shapeRef = doc(shapesRef, shapeId);
+        batch.delete(shapeRef);
+      });
+      
+      await batch.commit();
+    } catch (error) {
+      console.error("Error deleting drawing elements:", error);
+    }
+  };
+
+  // Check if a point is near a path
+  const isPointNearPath = (point: Position, path: DrawingPath, threshold: number = 10) => {
+    for (const p of path.points) {
+      const distance = Math.sqrt((point.x - p.x) ** 2 + (point.y - p.y) ** 2);
+      if (distance < threshold) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Check if a point is near a shape
+  const isPointNearShape = (point: Position, shape: Shape, threshold: number = 10) => {
+    if (shape.type === "rectangle") {
+      const minX = Math.min(shape.startPos.x, shape.endPos.x) - threshold;
+      const maxX = Math.max(shape.startPos.x, shape.endPos.x) + threshold;
+      const minY = Math.min(shape.startPos.y, shape.endPos.y) - threshold;
+      const maxY = Math.max(shape.startPos.y, shape.endPos.y) + threshold;
+      
+      return (
+        point.x >= minX && point.x <= maxX &&
+        point.y >= minY && point.y <= maxY
+      );
+    } else if (shape.type === "circle") {
+      const centerX = (shape.startPos.x + shape.endPos.x) / 2;
+      const centerY = (shape.startPos.y + shape.endPos.y) / 2;
+      const radius = Math.sqrt(
+        (shape.endPos.x - shape.startPos.x) ** 2 + 
+        (shape.endPos.y - shape.startPos.y) ** 2
+      ) / 2;
+      
+      const distance = Math.sqrt((point.x - centerX) ** 2 + (point.y - centerY) ** 2);
+      return Math.abs(distance - radius) <= threshold;
+    }
+    return false;
+  };
+
+  // Handle eraser selection
+  const handleEraserSelection = (point: Position) => {
+    const pathsToDelete: string[] = [];
+    const shapesToDelete: string[] = [];
+    
+    // Check paths
+    drawingPaths.forEach(path => {
+      if (isPointNearPath(point, path)) {
+        pathsToDelete.push(path.id);
+      }
+    });
+    
+    // Check shapes
+    shapes.forEach(shape => {
+      if (isPointNearShape(point, shape)) {
+        shapesToDelete.push(shape.id);
+      }
+    });
+    
+    if (pathsToDelete.length > 0 || shapesToDelete.length > 0) {
+      eraserSelectionRef.current = { paths: pathsToDelete, shapes: shapesToDelete };
+      return true;
+    }
+    
+    return false;
+  };
+
+  // Local state updates (not persisted to Firestore)
   const updateNotePosition = (id: string, position: Position) => {
     setNotes(
       notes.map((note) => (note.id === id ? { ...note, position } : note)),
@@ -96,13 +250,6 @@ const Whiteboard = () => {
 
   const updateNoteColor = (id: string, color: string) => {
     setNotes(notes.map((note) => (note.id === id ? { ...note, color } : note)));
-  };
-
-  const deleteNote = (id: string) => {
-    setNotes(notes.filter((note) => note.id !== id));
-    if (selectedNoteId === id) {
-      setSelectedNoteId(null);
-    }
   };
 
   const bringToFront = (id: string) => {
@@ -166,23 +313,28 @@ const Whiteboard = () => {
 
       const pos = getMousePosition(e);
 
+      if (selectedTool === "eraser") {
+        // Handle eraser selection
+        handleEraserSelection(pos);
+        return;
+      }
+
       if (selectedTool === "rectangle" || selectedTool === "circle") {
-        const newShape: Shape = {
-          id: Date.now().toString(),
+        const newShape: Omit<Shape, 'id'> = {
           type: selectedTool,
           startPos: pos,
           endPos: pos,
           color: drawingColor,
           strokeWidth: selectedTool === "brush" ? 4 : 2,
         };
-        setCurrentShape(newShape);
+        setCurrentShape(newShape as Shape);
         setIsDrawing(true);
       } else {
         setIsDrawing(true);
         setCurrentPath([pos]);
       }
     },
-    [selectedTool, getMousePosition, drawingColor],
+    [selectedTool, getMousePosition, drawingColor, drawingPaths, shapes],
   );
 
   const handleMouseMove = useCallback(
@@ -190,6 +342,12 @@ const Whiteboard = () => {
       if (selectedTool === "select" || !isDrawing) return;
 
       const pos = getMousePosition(e);
+
+      if (selectedTool === "eraser") {
+        // Update eraser selection as it moves
+        handleEraserSelection(pos);
+        return;
+      }
 
       if (selectedTool === "rectangle" || selectedTool === "circle") {
         if (currentShape) {
@@ -208,22 +366,39 @@ const Whiteboard = () => {
   const handleMouseUp = useCallback(() => {
     if (selectedTool === "select" || !isDrawing) return;
 
+    if (selectedTool === "eraser") {
+      // Delete selected elements from Firebase
+      const { paths, shapes } = eraserSelectionRef.current;
+      if (paths.length > 0 || shapes.length > 0) {
+        deleteDrawingElements(paths, shapes);
+      }
+      setIsDrawing(false);
+      return;
+    }
+
     if (selectedTool === "rectangle" || selectedTool === "circle") {
       if (currentShape) {
-        setShapes((prev) => [...prev, currentShape]);
+        // Save shape to Firestore
+        addShape({
+          type: currentShape.type,
+          startPos: currentShape.startPos,
+          endPos: currentShape.endPos,
+          color: currentShape.color,
+          strokeWidth: currentShape.strokeWidth,
+        });
         setCurrentShape(null);
       }
     } else if (currentPath.length > 1) {
       const strokeWidth =
         selectedTool === "brush" ? 4 : selectedTool === "eraser" ? 8 : 2;
-      const newPath: DrawingPath = {
-        id: Date.now().toString(),
+      
+      // Save path to Firestore
+      addDrawingPath({
         points: currentPath,
-        color: selectedTool === "eraser" ? "#FFFFFF" : drawingColor,
+        color: drawingColor,
         strokeWidth,
         tool: selectedTool,
-      };
-      setDrawingPaths((prev) => [...prev, newPath]);
+      });
     }
 
     setIsDrawing(false);
@@ -239,12 +414,6 @@ const Whiteboard = () => {
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
-      if (path.tool === "eraser") {
-        ctx.globalCompositeOperation = "destination-out";
-      } else {
-        ctx.globalCompositeOperation = "source-over";
-      }
-
       ctx.beginPath();
       ctx.moveTo(path.points[0].x, path.points[0].y);
 
@@ -253,7 +422,6 @@ const Whiteboard = () => {
       }
 
       ctx.stroke();
-      ctx.globalCompositeOperation = "source-over";
     },
     [],
   );
@@ -282,6 +450,65 @@ const Whiteboard = () => {
     [],
   );
 
+  const drawEraserPreview = useCallback(
+    (ctx: CanvasRenderingContext2D, point: Position) => {
+      ctx.strokeStyle = "#FF0000";
+      ctx.lineWidth = 2;
+      ctx.fillStyle = "rgba(255, 0, 0, 0.2)";
+      
+      const radius = 10;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.fill();
+    },
+    []
+  );
+
+  const drawSelectionPreview = useCallback(
+    (ctx: CanvasRenderingContext2D) => {
+      const { paths, shapes } = eraserSelectionRef.current;
+      
+      // Highlight selected paths
+      drawingPaths.forEach(path => {
+        if (paths.includes(path.id)) {
+          ctx.strokeStyle = "#FF0000";
+          ctx.lineWidth = path.strokeWidth + 4;
+          ctx.beginPath();
+          ctx.moveTo(path.points[0].x, path.points[0].y);
+          for (let i = 1; i < path.points.length; i++) {
+            ctx.lineTo(path.points[i].x, path.points[i].y);
+          }
+          ctx.stroke();
+        }
+      });
+      
+      // Highlight selected shapes
+      shapes.forEach(shape => {
+        if (shapes.includes(shape.id)) {
+          ctx.strokeStyle = "#FF0000";
+          ctx.lineWidth = shape.strokeWidth + 4;
+          
+          const width = shape.endPos.x - shape.startPos.x;
+          const height = shape.endPos.y - shape.startPos.y;
+          
+          if (shape.type === "rectangle") {
+            ctx.strokeRect(shape.startPos.x, shape.startPos.y, width, height);
+          } else if (shape.type === "circle") {
+            const centerX = shape.startPos.x + width / 2;
+            const centerY = shape.startPos.y + height / 2;
+            const radius = Math.sqrt(width * width + height * height) / 2;
+            
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+            ctx.stroke();
+          }
+        }
+      });
+    },
+    [drawingPaths, shapes]
+  );
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -303,14 +530,15 @@ const Whiteboard = () => {
       isDrawing &&
       currentPath.length > 1 &&
       selectedTool !== "rectangle" &&
-      selectedTool !== "circle"
+      selectedTool !== "circle" &&
+      selectedTool !== "eraser"
     ) {
       const strokeWidth =
         selectedTool === "brush" ? 4 : selectedTool === "eraser" ? 8 : 2;
       const tempPath: DrawingPath = {
         id: "temp",
         points: currentPath,
-        color: selectedTool === "eraser" ? "#FFFFFF" : drawingColor,
+        color: drawingColor,
         strokeWidth,
         tool: selectedTool,
       };
@@ -320,6 +548,13 @@ const Whiteboard = () => {
     // Draw current shape being drawn
     if (isDrawing && currentShape) {
       drawShape(ctx, currentShape);
+    }
+    
+    // Draw eraser preview
+    if (selectedTool === "eraser" && isDrawing && currentPath.length > 0) {
+      const lastPoint = currentPath[currentPath.length - 1];
+      drawEraserPreview(ctx, lastPoint);
+      drawSelectionPreview(ctx);
     }
   }, [
     drawingPaths,
@@ -331,6 +566,8 @@ const Whiteboard = () => {
     selectedTool,
     drawPath,
     drawShape,
+    drawEraserPreview,
+    drawSelectionPreview
   ]);
 
   useEffect(() => {

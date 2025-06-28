@@ -1,6 +1,15 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { 
+  getFirestore, 
+  collection, 
+  onSnapshot, 
+  addDoc, 
+  doc, 
+  deleteDoc,
+  setDoc,
+  writeBatch
+} from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { getAnalytics } from "firebase/analytics";
 import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
@@ -29,3 +38,14 @@ provider.setCustomParameters({
 });
 export const signInWithGoogle = () => signInWithPopup(auth, provider);
 export const signOut = () => firebaseSignOut(auth);
+
+// Export Firestore functions
+export { 
+  collection, 
+  onSnapshot, 
+  addDoc, 
+  doc, 
+  deleteDoc,
+  setDoc,
+  writeBatch
+};
