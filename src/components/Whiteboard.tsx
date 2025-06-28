@@ -11,7 +11,7 @@ import {
   deleteDoc,
   writeBatch
 } from "../firebase";
-import { DrawingPath, Shape, Note, Position } from "./whiteboardTypes";
+import { DrawingPath, Shape, Note, Position } from "../whiteboardTypes";
 
 const Whiteboard = () => {
   const [notes, setNotes] = useState<Note[]>([]);
@@ -26,7 +26,15 @@ const Whiteboard = () => {
   const [currentShape, setCurrentShape] = useState<Shape | null>(null);
   const whiteboardRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const eraserSelectionRef = useRef<{ paths: string[], shapes: string[] }>({ paths: [], shapes: [] });
+  
+  // Change to Sets to track entire elements for deletion
+  const eraserSelectionRef = useRef<{ 
+    paths: Set<string>; 
+    shapes: Set<string> 
+  }>({ 
+    paths: new Set(), 
+    shapes: new Set() 
+  });
 
   // Firebase collection references
   const notesRef = collection(db, "notes");
@@ -171,17 +179,6 @@ const Whiteboard = () => {
     }
   };
 
-  // Check if a point is near a path
-  const isPointNearPath = (point: Position, path: DrawingPath, threshold: number = 10) => {
-    for (const p of path.points) {
-      const distance = Math.sqrt((point.x - p.x) ** 2 + (point.y - p.y) ** 2);
-      if (distance < threshold) {
-        return true;
-      }
-    }
-    return false;
-  };
-
   // Check if a point is near a shape
   const isPointNearShape = (point: Position, shape: Shape, threshold: number = 10) => {
     if (shape.type === "rectangle") {
@@ -208,31 +205,29 @@ const Whiteboard = () => {
     return false;
   };
 
-  // Handle eraser selection
+  // Handle eraser selection - marks entire paths/shapes for deletion
   const handleEraserSelection = (point: Position) => {
-    const pathsToDelete: string[] = [];
-    const shapesToDelete: string[] = [];
-    
-    // Check paths
+    let found = false;
+
+    // Check paths - mark entire path if ANY point is near
     drawingPaths.forEach(path => {
-      if (isPointNearPath(point, path)) {
-        pathsToDelete.push(path.id);
+      if (path.points.some(p => 
+        Math.sqrt((p.x - point.x)**2 + (p.y - point.y)**2) < 10
+      )) {
+        eraserSelectionRef.current.paths.add(path.id);
+        found = true;
       }
     });
-    
-    // Check shapes
+
+    // Check shapes - mark entire shape if point is near
     shapes.forEach(shape => {
       if (isPointNearShape(point, shape)) {
-        shapesToDelete.push(shape.id);
+        eraserSelectionRef.current.shapes.add(shape.id);
+        found = true;
       }
     });
-    
-    if (pathsToDelete.length > 0 || shapesToDelete.length > 0) {
-      eraserSelectionRef.current = { paths: pathsToDelete, shapes: shapesToDelete };
-      return true;
-    }
-    
-    return false;
+
+    return found;
   };
 
   // Local state updates (not persisted to Firestore)
@@ -314,8 +309,14 @@ const Whiteboard = () => {
       const pos = getMousePosition(e);
 
       if (selectedTool === "eraser") {
-        // Handle eraser selection
+        // Reset selection sets
+        eraserSelectionRef.current.paths = new Set();
+        eraserSelectionRef.current.shapes = new Set();
+        
+        // Check initial point
         handleEraserSelection(pos);
+        setIsDrawing(true);
+        setCurrentPath([pos]);
         return;
       }
 
@@ -344,7 +345,9 @@ const Whiteboard = () => {
       const pos = getMousePosition(e);
 
       if (selectedTool === "eraser") {
-        // Update eraser selection as it moves
+        // Track movement for preview
+        setCurrentPath(prev => [...prev, pos]);
+        // Accumulate hits
         handleEraserSelection(pos);
         return;
       }
@@ -367,16 +370,14 @@ const Whiteboard = () => {
     if (selectedTool === "select" || !isDrawing) return;
 
     if (selectedTool === "eraser") {
-      // Delete selected elements from Firebase
-      const { paths, shapes } = eraserSelectionRef.current;
-      if (paths.length > 0 || shapes.length > 0) {
-        deleteDrawingElements(paths, shapes);
+      // Convert Sets to arrays for deletion
+      const pathsToDelete = Array.from(eraserSelectionRef.current.paths);
+      const shapesToDelete = Array.from(eraserSelectionRef.current.shapes);
+      
+      if (pathsToDelete.length > 0 || shapesToDelete.length > 0) {
+        deleteDrawingElements(pathsToDelete, shapesToDelete);
       }
-      setIsDrawing(false);
-      return;
-    }
-
-    if (selectedTool === "rectangle" || selectedTool === "circle") {
+    } else if (selectedTool === "rectangle" || selectedTool === "circle") {
       if (currentShape) {
         // Save shape to Firestore
         addShape({
@@ -467,11 +468,11 @@ const Whiteboard = () => {
 
   const drawSelectionPreview = useCallback(
     (ctx: CanvasRenderingContext2D) => {
-      const { paths, shapes } = eraserSelectionRef.current;
+      const { paths: pathSet, shapes: shapeSet } = eraserSelectionRef.current;
       
       // Highlight selected paths
       drawingPaths.forEach(path => {
-        if (paths.includes(path.id)) {
+        if (pathSet.has(path.id)) {
           ctx.strokeStyle = "#FF0000";
           ctx.lineWidth = path.strokeWidth + 4;
           ctx.beginPath();
@@ -485,7 +486,7 @@ const Whiteboard = () => {
       
       // Highlight selected shapes
       shapes.forEach(shape => {
-        if (shapes.includes(shape.id)) {
+        if (shapeSet.has(shape.id)) {
           ctx.strokeStyle = "#FF0000";
           ctx.lineWidth = shape.strokeWidth + 4;
           
@@ -550,10 +551,15 @@ const Whiteboard = () => {
       drawShape(ctx, currentShape);
     }
     
-    // Draw eraser preview
-    if (selectedTool === "eraser" && isDrawing && currentPath.length > 0) {
-      const lastPoint = currentPath[currentPath.length - 1];
-      drawEraserPreview(ctx, lastPoint);
+    // Draw eraser preview and selection
+    if (selectedTool === "eraser" && isDrawing) {
+      // Draw eraser position
+      if (currentPath.length > 0) {
+        const lastPoint = currentPath[currentPath.length - 1];
+        drawEraserPreview(ctx, lastPoint);
+      }
+      
+      // Draw selection preview
       drawSelectionPreview(ctx);
     }
   }, [
