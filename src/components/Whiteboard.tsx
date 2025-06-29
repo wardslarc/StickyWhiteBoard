@@ -594,22 +594,27 @@ const Whiteboard = () => {
   }, []);
 
   return (
-    <div className="flex flex-col h-full w-full bg-gray-100">
-      <Toolbar
-        onAddNote={addNote}
-        onColorChange={handleColorChange}
-        onDelete={handleDelete}
-        onIncreaseSize={handleIncreaseSize}
-        onDecreaseSize={handleDecreaseSize}
-        selectedNoteId={selectedNoteId}
-        selectedTool={selectedTool}
-        onToolChange={handleToolChange}
-        drawingColor={drawingColor}
-        noteCreationColor={noteCreationColor}
-        onNoteCreationColorChange={setNoteCreationColor}
-        onColorChange={handleColorChange} // For existing notes
-        handleDrawingColorChange={setDrawingColor} // For drawing tools
-      />
+    <div className="flex flex-row h-full w-full bg-gray-100">
+      {/* Vertical Toolbar Container */}
+      <div className="flex flex-col h-full bg-gray-800 text-white p-3 shadow-xl w-20 items-center justify-start space-y-6">
+        <Toolbar
+          onAddNote={addNote}
+          onColorChange={handleColorChange}
+          onDelete={handleDelete}
+          onIncreaseSize={handleIncreaseSize}
+          onDecreaseSize={handleDecreaseSize}
+          selectedNoteId={selectedNoteId}
+          selectedTool={selectedTool}
+          onToolChange={handleToolChange}
+          drawingColor={drawingColor}
+          noteCreationColor={noteCreationColor}
+          onNoteCreationColorChange={setNoteCreationColor}
+          handleDrawingColorChange={setDrawingColor}
+          verticalLayout={true}
+        />
+      </div>
+      
+      {/* Whiteboard Area */}
       <motion.div
         ref={whiteboardRef}
         className="flex-grow relative overflow-hidden bg-white"

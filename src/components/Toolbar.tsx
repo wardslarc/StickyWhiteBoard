@@ -56,9 +56,8 @@ const Toolbar = ({
   drawingColor,
   onDrawingColorChange,
   noteCreationColor,
-  onNoteCreationColorChange
+  onNoteCreationColorChange,
 }: ToolbarProps) => {
-  // Removed local selectedColor state
   const colors = [
     { name: "Yellow", value: "#FFEB3B" },
     { name: "Green", value: "#CDDC39" },
@@ -86,51 +85,46 @@ const Toolbar = ({
     { name: "Circle", value: "circle" as DrawingTool, icon: Circle },
   ];
 
-  // Removed handleColorSelect and handleDrawingColorSelect functions
-
   const handleToolSelect = (tool: DrawingTool) => {
     onToolChange(tool);
   };
 
- return (
-  <div className="flex items-center justify-between p-3 bg-white border-b shadow-sm w-full">
-    <div className="flex items-center space-x-3">
-      {/* Drawing Tools */}
-      <div className="flex items-center space-x-1">
-        {drawingTools.map((tool) => {
-          const IconComponent = tool.icon;
-          return (
-            <TooltipProvider key={tool.value}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={
-                      selectedTool === tool.value ? "default" : "outline"
-                    }
-                    size="icon"
-                    onClick={() => handleToolSelect(tool.value)}
-                    className={
-                      selectedTool === tool.value
-                        ? "bg-blue-500 hover:bg-blue-600 text-white"
-                        : "hover:bg-gray-100"
-                    }
-                  >
-                    <IconComponent className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>{tool.name}</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          );
-        })}
-      </div>
+  return (
+    <div className="flex flex-col items-center p-3 bg-white border-r shadow-sm h-full w-20 space-y-3">
+      {drawingTools.map((tool) => {
+        const IconComponent = tool.icon;
+        const isActive = selectedTool === tool.value;
+        return (
+          <TooltipProvider key={tool.value}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => handleToolSelect(tool.value)}
+                  className={`w-12 h-12 ${
+                    isActive
+                      ? "border-l-4 border-blue-500 bg-blue-100"
+                      : "hover:bg-gray-100"
+                  }`}
+                >
+                  <IconComponent
+                    className={`h-4 w-4 ${
+                      isActive ? "text-blue-600" : "text-gray-700"
+                    }`}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p>{tool.name}</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        );
+      })}
 
-      {/* Separator */}
-      <div className="h-6 w-px bg-gray-300" />
+      <div className="w-8 h-px bg-gray-300" />
 
-      {/* Drawing Color Picker */}
       {selectedTool !== "select" && selectedTool !== "eraser" && (
         <Popover>
           <TooltipProvider>
@@ -140,14 +134,14 @@ const Toolbar = ({
                   <Button
                     variant="outline"
                     size="icon"
-                    className="hover:bg-gray-100"
-                    style={{ borderBottom: `3px solid ${drawingColor}` }}
+                    className="w-12 h-12 border-l-4"
+                    style={{ borderColor: drawingColor }}
                   >
-                    <Palette className="h-4 w-4" />
+                    <Palette className="h-4 w-4 text-gray-700" />
                   </Button>
                 </PopoverTrigger>
               </TooltipTrigger>
-              <TooltipContent>
+              <TooltipContent side="right">
                 <p>Drawing color</p>
               </TooltipContent>
             </Tooltip>
@@ -168,7 +162,6 @@ const Toolbar = ({
         </Popover>
       )}
 
-      {/* Add Note Button */}
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -176,18 +169,17 @@ const Toolbar = ({
               variant="outline"
               size="icon"
               onClick={onAddNote}
-              className="hover:bg-gray-100"
+              className="w-12 h-12 hover:bg-gray-100"
             >
-              <Plus className="h-4 w-4" />
+              <Plus className="h-4 w-4 text-gray-700" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>
+          <TooltipContent side="right">
             <p>Add sticky note</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
 
-      {/* Note Creation Color Picker */}
       <Popover>
         <TooltipProvider>
           <Tooltip>
@@ -196,16 +188,14 @@ const Toolbar = ({
                 <Button
                   variant="outline"
                   size="icon"
-                  className="hover:bg-gray-100"
-                  style={{ 
-                    borderBottom: `3px solid ${noteCreationColor}` 
-                  }}
+                  className="w-12 h-12 border-l-4"
+                  style={{ borderColor: noteCreationColor }}
                 >
-                  <Square className="h-4 w-4" />
+                  <Square className="h-4 w-4 text-gray-700" />
                 </Button>
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent>
+            <TooltipContent side="right">
               <p>New note color</p>
             </TooltipContent>
           </Tooltip>
@@ -225,7 +215,6 @@ const Toolbar = ({
         </PopoverContent>
       </Popover>
 
-      {/* Existing Note Color Picker */}
       <Popover>
         <TooltipProvider>
           <Tooltip>
@@ -235,18 +224,16 @@ const Toolbar = ({
                   variant="outline"
                   size="icon"
                   disabled={!selectedNoteId}
-                  className="hover:bg-gray-100 disabled:opacity-50"
+                  className="w-12 h-12 disabled:opacity-50 border-l-4"
                   style={{
-                    borderBottom: selectedNoteId
-                      ? `3px solid ${noteCreationColor}` // Use noteCreationColor here
-                      : undefined,
+                    borderColor: selectedNoteId ? noteCreationColor : "transparent",
                   }}
                 >
-                  <Palette className="h-4 w-4" />
+                  <Palette className="h-4 w-4 text-gray-700" />
                 </Button>
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent>
+            <TooltipContent side="right">
               <p>Note color</p>
             </TooltipContent>
           </Tooltip>
@@ -266,7 +253,6 @@ const Toolbar = ({
         </PopoverContent>
       </Popover>
 
-      {/* Note Size Controls */}
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -275,12 +261,12 @@ const Toolbar = ({
               size="icon"
               disabled={!selectedNoteId}
               onClick={onIncreaseSize}
-              className="hover:bg-gray-100 disabled:opacity-50"
+              className="w-12 h-12 disabled:opacity-50 hover:bg-gray-100"
             >
-              <Maximize2 className="h-4 w-4" />
+              <Maximize2 className="h-4 w-4 text-gray-700" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>
+          <TooltipContent side="right">
             <p>Increase size</p>
           </TooltipContent>
         </Tooltip>
@@ -294,18 +280,17 @@ const Toolbar = ({
               size="icon"
               disabled={!selectedNoteId}
               onClick={onDecreaseSize}
-              className="hover:bg-gray-100 disabled:opacity-50"
+              className="w-12 h-12 disabled:opacity-50 hover:bg-gray-100"
             >
-              <Minimize2 className="h-4 w-4" />
+              <Minimize2 className="h-4 w-4 text-gray-700" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>
+          <TooltipContent side="right">
             <p>Decrease size</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
 
-      {/* Delete Button */}
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -314,26 +299,18 @@ const Toolbar = ({
               size="icon"
               disabled={!selectedNoteId}
               onClick={onDelete}
-              className="hover:bg-red-100 text-red-500 disabled:opacity-50"
+              className="w-12 h-12 hover:bg-red-100 text-red-500 disabled:opacity-50"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>
+          <TooltipContent side="right">
             <p>Delete note</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
     </div>
+  );
+};
 
-    <div className="text-sm font-medium text-gray-500">
-      {selectedTool === "select"
-        ? selectedNoteId
-          ? "Note selected - Use tools to modify"
-          : "Select a tool or click a note"
-        : `${selectedTool.charAt(0).toUpperCase() + selectedTool.slice(1)} tool active`}
-    </div>
-  </div>
-);
-}
 export default Toolbar;
