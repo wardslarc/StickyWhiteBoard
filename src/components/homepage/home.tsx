@@ -108,19 +108,12 @@ export default function Home() {
       <header className="bg-white shadow-sm py-4 px-6 md:px-10 lg:px-16">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
           <div className="flex items-center space-x-2">
-            <div className="h-8 w-8 bg-blue-500 rounded-md flex items-center justify-center">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-5 w-5 text-white"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z" />
-              </svg>
+            <div className="h-8 w-8 flex items-center justify-center">
+              <img
+                src="/stickylogo.png"
+                alt="Logo"
+                className="h-8 w-8 object-contain"
+              />
             </div>
             <span className="font-bold text-xl text-gray-800">
               Sticky White Board
@@ -974,20 +967,13 @@ export default function Home() {
         <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-8">
           <div>
             <div className="flex items-center space-x-2 mb-4">
-              <div className="h-8 w-8 bg-blue-500 rounded-md flex items-center justify-center">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="h-5 w-5 text-white"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z" />
-                </svg>
-              </div>
+              <div className="h-8 w-8 flex items-center justify-center">
+                    <img
+                      src="/stickylogo.png"
+                      alt="Logo"
+                      className="h-8 w-8 object-contain"
+                    />
+                  </div>
               <span className="font-bold text-xl text-white">
                 Sticky White Board
               </span>

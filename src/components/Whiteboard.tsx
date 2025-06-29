@@ -11,7 +11,7 @@ import {
   deleteDoc,
   writeBatch
 } from "../firebase";
-import { DrawingPath, Shape, Note, Position } from "../whiteboardTypes";
+import { DrawingPath, Shape, Note, Position } from "./whiteboardTypes";
 
 const Whiteboard = () => {
   const [notes, setNotes] = useState<Note[]>([]);
@@ -26,6 +26,7 @@ const Whiteboard = () => {
   const [currentShape, setCurrentShape] = useState<Shape | null>(null);
   const whiteboardRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [noteCreationColor, setNoteCreationColor] = useState<string>("#ffcc80");
   
   // Change to Sets to track entire elements for deletion
   const eraserSelectionRef = useRef<{ 
@@ -113,7 +114,7 @@ const Whiteboard = () => {
     const newNote = {
       content: "New note",
       position: { x: 50, y: 50 },
-      color: "#ffcc80",
+      color: noteCreationColor,
       zIndex: newZIndex,
     };
 
@@ -604,7 +605,10 @@ const Whiteboard = () => {
         selectedTool={selectedTool}
         onToolChange={handleToolChange}
         drawingColor={drawingColor}
-        onDrawingColorChange={handleDrawingColorChange}
+        noteCreationColor={noteCreationColor}
+        onNoteCreationColorChange={setNoteCreationColor}
+        onColorChange={handleColorChange} // For existing notes
+        handleDrawingColorChange={setDrawingColor} // For drawing tools
       />
       <motion.div
         ref={whiteboardRef}
