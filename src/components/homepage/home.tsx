@@ -58,22 +58,35 @@ export default function Home() {
       const userRef = doc(db, "users", user.uid);
       const userSnap = await getDoc(userRef);
 
-      if(!userSnap.exists()){
+      if (!userSnap.exists()) {
         await setDoc(userRef, {
-            email:user.email,
-            lastLogin: new Date(),
-            uid:user.uid,
+          email: user.email,
+          lastLogin: new Date(),
+          uid: user.uid,
+          role: "user",
         });
-      }else{
-        await setDoc(userRef, { lastLogin:new Date()}, { merge: true});
+        navigate("/drawing", { replace: true });
+      } else {
+        await setDoc(userRef, { lastLogin: new Date() }, { merge: true });
+
+        const userData = userSnap.data();
+        const role = userData.role || "user";
+
+        if (role === "admin") {
+          navigate("/admin", { replace: true });
+        } else {
+          navigate("/drawing", { replace: true });
+        }
       }
+
       console.log("Logged in user:", userCredential.user);
       setLoginOpen(false);
-      navigate("/drawing", { replace: true });
-    } catch (error: any){
+      // ✅ Don't redirect again here — it's already done above
+    } catch (error: any) {
       console.error("Login error:", error.message);
     }
   };
+
 
   const handleSignupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,6 +105,7 @@ export default function Home() {
         email:user.email,
         createdAt: new Date(),
         uid: user.uid,
+        role: "user", // default role
       });
       
       console.log("Signed up user:", userCredential.user);
