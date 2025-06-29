@@ -9,11 +9,15 @@ import {
   addDoc, 
   doc, 
   deleteDoc,
-  writeBatch
+  writeBatch,
+  query,
+  where
 } from "../firebase";
 import { DrawingPath, Shape, Note, Position } from "./whiteboardTypes";
+import { getAuth } from "firebase/auth";
 
 const Whiteboard = () => {
+  const [userId, setUserId] = useState<string | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const [highestZIndex, setHighestZIndex] = useState<number>(0);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
@@ -28,7 +32,6 @@ const Whiteboard = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [noteCreationColor, setNoteCreationColor] = useState<string>("#ffcc80");
   
-  // Change to Sets to track entire elements for deletion
   const eraserSelectionRef = useRef<{ 
     paths: Set<string>; 
     shapes: Set<string> 
@@ -37,15 +40,26 @@ const Whiteboard = () => {
     shapes: new Set() 
   });
 
+  // Get current user
+  useEffect(() => {
+    const auth = getAuth();
+    const unsubscribe = auth.onAuthStateChanged(user => {
+      setUserId(user ? user.uid : null);
+    });
+    return unsubscribe;
+  }, []);
+
   // Firebase collection references
-  const notesRef = collection(db, "notes");
-  const drawingPathsRef = collection(db, "drawingPaths");
-  const shapesRef = collection(db, "shapes");
+  const getNotesRef = () => query(collection(db, "notes"), where("userId", "==", userId));
+  const getDrawingPathsRef = () => query(collection(db, "drawingPaths"), where("userId", "==", userId));
+  const getShapesRef = () => query(collection(db, "shapes"), where("userId", "==", userId));
 
   // Load all whiteboard data from Firestore
   useEffect(() => {
+    if (!userId) return;
+
     // Load notes
-    const notesUnsubscribe = onSnapshot(notesRef, (snapshot) => {
+    const notesUnsubscribe = onSnapshot(getNotesRef(), (snapshot) => {
       const notesData: Note[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
@@ -59,7 +73,6 @@ const Whiteboard = () => {
       });
       setNotes(notesData);
       
-      // Calculate highest zIndex
       if (notesData.length > 0) {
         const maxZIndex = Math.max(...notesData.map(note => note.zIndex));
         setHighestZIndex(maxZIndex);
@@ -69,7 +82,7 @@ const Whiteboard = () => {
     });
 
     // Load drawing paths
-    const pathsUnsubscribe = onSnapshot(drawingPathsRef, (snapshot) => {
+    const pathsUnsubscribe = onSnapshot(getDrawingPathsRef(), (snapshot) => {
       const pathsData: DrawingPath[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
@@ -85,7 +98,7 @@ const Whiteboard = () => {
     });
 
     // Load shapes
-    const shapesUnsubscribe = onSnapshot(shapesRef, (snapshot) => {
+    const shapesUnsubscribe = onSnapshot(getShapesRef(), (snapshot) => {
       const shapesData: Shape[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
@@ -106,20 +119,23 @@ const Whiteboard = () => {
       pathsUnsubscribe();
       shapesUnsubscribe();
     };
-  }, []);
+  }, [userId]);
 
   // Add a new sticky note
   const addNote = async () => {
+    if (!userId) return;
+    
     const newZIndex = highestZIndex + 1;
     const newNote = {
       content: "New note",
       position: { x: 50, y: 50 },
       color: noteCreationColor,
       zIndex: newZIndex,
+      userId: userId
     };
 
     try {
-      await addDoc(notesRef, newNote);
+      await addDoc(collection(db, "notes"), newNote);
     } catch (error) {
       console.error("Error adding note:", error);
     }
@@ -128,7 +144,7 @@ const Whiteboard = () => {
   // Delete a sticky note
   const deleteNote = async (id: string) => {
     try {
-      await deleteDoc(doc(notesRef, id));
+      await deleteDoc(doc(db, "notes", id));
       if (selectedNoteId === id) {
         setSelectedNoteId(null);
       }
@@ -139,8 +155,13 @@ const Whiteboard = () => {
 
   // Add a new drawing path
   const addDrawingPath = async (path: Omit<DrawingPath, 'id'>) => {
+    if (!userId) return;
+    
     try {
-      await addDoc(drawingPathsRef, path);
+      await addDoc(collection(db, "drawingPaths"), {
+        ...path,
+        userId: userId
+      });
     } catch (error) {
       console.error("Error adding drawing path:", error);
     }
@@ -148,8 +169,13 @@ const Whiteboard = () => {
 
   // Add a new shape
   const addShape = async (shape: Omit<Shape, 'id'>) => {
+    if (!userId) return;
+    
     try {
-      await addDoc(shapesRef, shape);
+      await addDoc(collection(db, "shapes"), {
+        ...shape,
+        userId: userId
+      });
     } catch (error) {
       console.error("Error adding shape:", error);
     }
@@ -162,15 +188,13 @@ const Whiteboard = () => {
     try {
       const batch = writeBatch(db);
       
-      // Add path deletions to batch
       paths.forEach(pathId => {
-        const pathRef = doc(drawingPathsRef, pathId);
+        const pathRef = doc(db, "drawingPaths", pathId);
         batch.delete(pathRef);
       });
       
-      // Add shape deletions to batch
       shapes.forEach(shapeId => {
-        const shapeRef = doc(shapesRef, shapeId);
+        const shapeRef = doc(db, "shapes", shapeId);
         batch.delete(shapeRef);
       });
       
@@ -206,11 +230,10 @@ const Whiteboard = () => {
     return false;
   };
 
-  // Handle eraser selection - marks entire paths/shapes for deletion
+  // Handle eraser selection
   const handleEraserSelection = (point: Position) => {
     let found = false;
 
-    // Check paths - mark entire path if ANY point is near
     drawingPaths.forEach(path => {
       if (path.points.some(p => 
         Math.sqrt((p.x - point.x)**2 + (p.y - point.y)**2) < 10
@@ -220,7 +243,6 @@ const Whiteboard = () => {
       }
     });
 
-    // Check shapes - mark entire shape if point is near
     shapes.forEach(shape => {
       if (isPointNearShape(point, shape)) {
         eraserSelectionRef.current.shapes.add(shape.id);
@@ -231,7 +253,7 @@ const Whiteboard = () => {
     return found;
   };
 
-  // Local state updates (not persisted to Firestore)
+  // Local state updates
   const updateNotePosition = (id: string, position: Position) => {
     setNotes(
       notes.map((note) => (note.id === id ? { ...note, position } : note)),
@@ -310,11 +332,8 @@ const Whiteboard = () => {
       const pos = getMousePosition(e);
 
       if (selectedTool === "eraser") {
-        // Reset selection sets
         eraserSelectionRef.current.paths = new Set();
         eraserSelectionRef.current.shapes = new Set();
-        
-        // Check initial point
         handleEraserSelection(pos);
         setIsDrawing(true);
         setCurrentPath([pos]);
@@ -346,9 +365,7 @@ const Whiteboard = () => {
       const pos = getMousePosition(e);
 
       if (selectedTool === "eraser") {
-        // Track movement for preview
         setCurrentPath(prev => [...prev, pos]);
-        // Accumulate hits
         handleEraserSelection(pos);
         return;
       }
@@ -371,7 +388,6 @@ const Whiteboard = () => {
     if (selectedTool === "select" || !isDrawing) return;
 
     if (selectedTool === "eraser") {
-      // Convert Sets to arrays for deletion
       const pathsToDelete = Array.from(eraserSelectionRef.current.paths);
       const shapesToDelete = Array.from(eraserSelectionRef.current.shapes);
       
@@ -380,7 +396,6 @@ const Whiteboard = () => {
       }
     } else if (selectedTool === "rectangle" || selectedTool === "circle") {
       if (currentShape) {
-        // Save shape to Firestore
         addShape({
           type: currentShape.type,
           startPos: currentShape.startPos,
@@ -394,7 +409,6 @@ const Whiteboard = () => {
       const strokeWidth =
         selectedTool === "brush" ? 4 : selectedTool === "eraser" ? 8 : 2;
       
-      // Save path to Firestore
       addDrawingPath({
         points: currentPath,
         color: drawingColor,
@@ -471,7 +485,6 @@ const Whiteboard = () => {
     (ctx: CanvasRenderingContext2D) => {
       const { paths: pathSet, shapes: shapeSet } = eraserSelectionRef.current;
       
-      // Highlight selected paths
       drawingPaths.forEach(path => {
         if (pathSet.has(path.id)) {
           ctx.strokeStyle = "#FF0000";
@@ -485,7 +498,6 @@ const Whiteboard = () => {
         }
       });
       
-      // Highlight selected shapes
       shapes.forEach(shape => {
         if (shapeSet.has(shape.id)) {
           ctx.strokeStyle = "#FF0000";
@@ -518,16 +530,11 @@ const Whiteboard = () => {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Draw all paths
     drawingPaths.forEach((path) => drawPath(ctx, path));
-
-    // Draw all shapes
     shapes.forEach((shape) => drawShape(ctx, shape));
 
-    // Draw current path being drawn
     if (
       isDrawing &&
       currentPath.length > 1 &&
@@ -547,20 +554,16 @@ const Whiteboard = () => {
       drawPath(ctx, tempPath);
     }
 
-    // Draw current shape being drawn
     if (isDrawing && currentShape) {
       drawShape(ctx, currentShape);
     }
     
-    // Draw eraser preview and selection
     if (selectedTool === "eraser" && isDrawing) {
-      // Draw eraser position
       if (currentPath.length > 0) {
         const lastPoint = currentPath[currentPath.length - 1];
         drawEraserPreview(ctx, lastPoint);
       }
       
-      // Draw selection preview
       drawSelectionPreview(ctx);
     }
   }, [
@@ -595,7 +598,6 @@ const Whiteboard = () => {
 
   return (
     <div className="flex flex-row h-full w-full bg-gray-100">
-      {/* Vertical Toolbar Container */}
       <div className="flex flex-col h-full bg-gray-800 text-white p-3 shadow-xl w-20 items-center justify-start space-y-6">
         <Toolbar
           onAddNote={addNote}
@@ -614,9 +616,9 @@ const Whiteboard = () => {
         />
       </div>
       
-      {/* Whiteboard Area */}
       <motion.div
         ref={whiteboardRef}
+        id={`whiteboard-${userId || 'anonymous'}`}
         className="flex-grow relative overflow-hidden bg-white"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}

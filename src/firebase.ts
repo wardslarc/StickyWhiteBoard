@@ -8,7 +8,9 @@ import {
   doc, 
   deleteDoc,
   setDoc,
-  writeBatch
+  writeBatch,
+  query,
+  where
 } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { getAnalytics } from "firebase/analytics";
@@ -47,5 +49,7 @@ export {
   doc, 
   deleteDoc,
   setDoc,
-  writeBatch
+  writeBatch,
+  query,
+  where
 };
