@@ -17,6 +17,9 @@ import UserManagement from "./components/admin/UserManagement";
 // ✅ Import the Toaster
 import { Toaster } from "sonner";
 
+//import board manager
+import Board from "./components/boardmanager/Board";
+
 
 function App() {
   return (
@@ -25,9 +28,13 @@ function App() {
         {/* Public */}
         <Route path="/" element={<Home />} />
 
+        {/* Board Manager */}
+        <Route path="/board" element={<ProtectedRoute><Board/></ProtectedRoute>}/>
+
+
         {/* Authenticated Users */}
         <Route
-          path="/drawing"
+          path="/drawing/:id"  // Add :id parameter
           element={
             <ProtectedRoute>
               <WhiteBoard />
@@ -58,6 +65,8 @@ function App() {
           <Route path="contentmoderation" element={<ContentModeration />} />
           <Route path="settings" element={<Settings />} />
           <Route path="subscriptionbilling" element={<SubscriptionBilling />} />
+
+
         </Route>
       </Routes>
 

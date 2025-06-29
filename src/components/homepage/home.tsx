@@ -65,7 +65,7 @@ export default function Home() {
           uid: user.uid,
           role: "user",
         });
-        navigate("/drawing", { replace: true });
+        navigate("/board", { replace: true });
       } else {
         await setDoc(userRef, { lastLogin: new Date() }, { merge: true });
 
@@ -75,7 +75,7 @@ export default function Home() {
         if (role === "admin") {
           navigate("/admin", { replace: true });
         } else {
-          navigate("/drawing", { replace: true });
+          navigate("/board", { replace: true });
         }
       }
 
@@ -110,7 +110,7 @@ export default function Home() {
       
       console.log("Signed up user:", userCredential.user);
       setSignupOpen(false);
-      navigate("/drawing", { replace: true });
+      navigate("/board", { replace: true });
     }catch(error: any){
       console.error("Signup error:", error.message);
     }

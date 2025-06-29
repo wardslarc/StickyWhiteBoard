@@ -9,15 +9,20 @@ import {
   addDoc, 
   doc, 
   deleteDoc,
+  getDoc, // Make sure this is imported
   writeBatch,
   query,
-  where
+  where,
+  Timestamp
 } from "../firebase";
-import { DrawingPath, Shape, Note, Position } from "./whiteboardTypes";
+import { DrawingPath, Shape, Note, Position, Board } from "./whiteboardTypes";
 import { getAuth } from "firebase/auth";
+import { useParams } from "react-router-dom";
 
 const Whiteboard = () => {
+  const { id: boardId } = useParams<{ id: string }>();
   const [userId, setUserId] = useState<string | null>(null);
+  const [board, setBoard] = useState<Board | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const [highestZIndex, setHighestZIndex] = useState<number>(0);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
@@ -40,23 +45,59 @@ const Whiteboard = () => {
     shapes: new Set() 
   });
 
-  // Get current user
+  // Get current user and board data
   useEffect(() => {
     const auth = getAuth();
-    const unsubscribe = auth.onAuthStateChanged(user => {
-      setUserId(user ? user.uid : null);
+    const unsubscribe = auth.onAuthStateChanged(async user => {
+      if (user) {
+        setUserId(user.uid);
+        
+        // Fetch board data
+        if (boardId) {
+          try {
+            const boardRef = doc(db, "boards", boardId);
+            const boardSnap = await getDoc(boardRef);
+            
+            if (boardSnap.exists()) {
+              const boardData = boardSnap.data() as Board;
+              setBoard({
+                ...boardData,
+                id: boardSnap.id,
+                lastEdited: boardData.lastEdited || Timestamp.now()
+              });
+            } else {
+              console.error("Board not found");
+            }
+          } catch (error) {
+            console.error("Error loading board:", error);
+          }
+        }
+      } else {
+        setUserId(null);
+      }
     });
     return unsubscribe;
-  }, []);
+  }, [boardId]);
 
-  // Firebase collection references
-  const getNotesRef = () => query(collection(db, "notes"), where("userId", "==", userId));
-  const getDrawingPathsRef = () => query(collection(db, "drawingPaths"), where("userId", "==", userId));
-  const getShapesRef = () => query(collection(db, "shapes"), where("userId", "==", userId));
+  // Firebase collection references with board ID
+  const getNotesRef = () => query(
+    collection(db, "notes"), 
+    where("boardId", "==", boardId)
+  );
+  
+  const getDrawingPathsRef = () => query(
+    collection(db, "drawingPaths"), 
+    where("boardId", "==", boardId)
+  );
+  
+  const getShapesRef = () => query(
+    collection(db, "shapes"), 
+    where("boardId", "==", boardId)
+  );
 
   // Load all whiteboard data from Firestore
   useEffect(() => {
-    if (!userId) return;
+    if (!boardId) return;
 
     // Load notes
     const notesUnsubscribe = onSnapshot(getNotesRef(), (snapshot) => {
@@ -69,6 +110,7 @@ const Whiteboard = () => {
           position: data.position,
           color: data.color,
           zIndex: data.zIndex,
+          boardId: boardId
         });
       });
       setNotes(notesData);
@@ -92,6 +134,7 @@ const Whiteboard = () => {
           color: data.color,
           strokeWidth: data.strokeWidth,
           tool: data.tool,
+          boardId: boardId
         });
       });
       setDrawingPaths(pathsData);
@@ -109,6 +152,7 @@ const Whiteboard = () => {
           endPos: data.endPos,
           color: data.color,
           strokeWidth: data.strokeWidth,
+          boardId: boardId
         });
       });
       setShapes(shapesData);
@@ -119,11 +163,34 @@ const Whiteboard = () => {
       pathsUnsubscribe();
       shapesUnsubscribe();
     };
-  }, [userId]);
+  }, [boardId]);
+
+  // Update board lastEdited timestamp when changes occur
+  useEffect(() => {
+    if (!boardId || !board) return;
+    
+    const updateBoardTimestamp = async () => {
+      try {
+        const boardRef = doc(db, "boards", boardId);
+        await updateDoc(boardRef, {
+          lastEdited: Timestamp.now()
+        });
+        // Update local state to reflect new timestamp
+        setBoard(prev => prev ? {
+          ...prev,
+          lastEdited: Timestamp.now()
+        } : null);
+      } catch (error) {
+        console.error("Error updating board timestamp:", error);
+      }
+    };
+    
+    updateBoardTimestamp();
+  }, [notes, drawingPaths, shapes, boardId, board]);
 
   // Add a new sticky note
   const addNote = async () => {
-    if (!userId) return;
+    if (!boardId) return;
     
     const newZIndex = highestZIndex + 1;
     const newNote = {
@@ -131,7 +198,7 @@ const Whiteboard = () => {
       position: { x: 50, y: 50 },
       color: noteCreationColor,
       zIndex: newZIndex,
-      userId: userId
+      boardId: boardId
     };
 
     try {
@@ -155,12 +222,12 @@ const Whiteboard = () => {
 
   // Add a new drawing path
   const addDrawingPath = async (path: Omit<DrawingPath, 'id'>) => {
-    if (!userId) return;
+    if (!boardId) return;
     
     try {
       await addDoc(collection(db, "drawingPaths"), {
         ...path,
-        userId: userId
+        boardId: boardId
       });
     } catch (error) {
       console.error("Error adding drawing path:", error);
@@ -169,12 +236,12 @@ const Whiteboard = () => {
 
   // Add a new shape
   const addShape = async (shape: Omit<Shape, 'id'>) => {
-    if (!userId) return;
+    if (!boardId) return;
     
     try {
       await addDoc(collection(db, "shapes"), {
         ...shape,
-        userId: userId
+        boardId: boardId
       });
     } catch (error) {
       console.error("Error adding shape:", error);
@@ -597,60 +664,85 @@ const Whiteboard = () => {
   }, []);
 
   return (
-    <div className="flex flex-row h-full w-full bg-gray-100">
-      <div className="flex flex-col h-full bg-gray-800 text-white p-3 shadow-xl w-20 items-center justify-start space-y-6">
-        <Toolbar
-          onAddNote={addNote}
-          onColorChange={handleColorChange}
-          onDelete={handleDelete}
-          onIncreaseSize={handleIncreaseSize}
-          onDecreaseSize={handleDecreaseSize}
-          selectedNoteId={selectedNoteId}
-          selectedTool={selectedTool}
-          onToolChange={handleToolChange}
-          drawingColor={drawingColor}
-          noteCreationColor={noteCreationColor}
-          onNoteCreationColorChange={setNoteCreationColor}
-          handleDrawingColorChange={setDrawingColor}
-          verticalLayout={true}
-        />
-      </div>
+    <div className="flex flex-col h-full w-full bg-gray-100">
+      {/* Board Header */}
+      {board && (
+        <div className="bg-white shadow-sm p-4 flex justify-between items-center">
+          <div>
+            <h1 className="text-xl font-bold">{board.title || "Untitled Board"}</h1>
+            <p className="text-gray-500 text-sm">
+              Last edited: {board.lastEdited?.toDate().toLocaleString() || "Just now"}
+            </p>
+          </div>
+          <div className="flex items-center space-x-2">
+            {userId && (
+              <div className="flex items-center">
+                <div className="w-8 h-8 rounded-full bg-gray-300 flex items-center justify-center">
+                  {board.userId === userId ? "👑" : "👤"}
+                </div>
+                <span className="ml-2">
+                  {board.userId === userId ? "You" : "Collaborator"}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       
-      <motion.div
-        ref={whiteboardRef}
-        id={`whiteboard-${userId || 'anonymous'}`}
-        className="flex-grow relative overflow-hidden bg-white"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5 }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        style={{ cursor: selectedTool !== "select" ? "crosshair" : "default" }}
-      >
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 pointer-events-none z-10"
-        />
-        {notes.map((note) => (
-          <StickyNote
-            key={note.id}
-            id={note.id}
-            initialX={note.position.x}
-            initialY={note.position.y}
-            initialColor={note.color}
-            initialContent={note.content}
-            onDelete={() => deleteNote(note.id)}
-            onContentChange={(id, content) => updateNoteContent(id, content)}
-            onPositionChange={(id, x, y) => updateNotePosition(id, { x, y })}
-            onSelect={() => handleNoteSelect(note.id)}
-            isSelected={selectedNoteId === note.id}
+      <div className="flex flex-row h-full w-full">
+        <div className="flex flex-col h-full bg-gray-800 text-white p-3 shadow-xl w-20 items-center justify-start space-y-6">
+          <Toolbar
+            onAddNote={addNote}
+            onColorChange={handleColorChange}
+            onDelete={handleDelete}
+            onIncreaseSize={handleIncreaseSize}
+            onDecreaseSize={handleDecreaseSize}
+            selectedNoteId={selectedNoteId}
             selectedTool={selectedTool}
+            onToolChange={handleToolChange}
             drawingColor={drawingColor}
-            style={{ zIndex: note.zIndex }}
+            noteCreationColor={noteCreationColor}
+            onNoteCreationColorChange={setNoteCreationColor}
+            handleDrawingColorChange={setDrawingColor}
+            verticalLayout={true}
           />
-        ))}
-      </motion.div>
+        </div>
+        
+        <motion.div
+          ref={whiteboardRef}
+          className="flex-grow relative overflow-hidden bg-white"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.5 }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          style={{ cursor: selectedTool !== "select" ? "crosshair" : "default" }}
+        >
+          <canvas
+            ref={canvasRef}
+            className="absolute inset-0 pointer-events-none z-10"
+          />
+          {notes.map((note) => (
+            <StickyNote
+              key={note.id}
+              id={note.id}
+              initialX={note.position.x}
+              initialY={note.position.y}
+              initialColor={note.color}
+              initialContent={note.content}
+              onDelete={() => deleteNote(note.id)}
+              onContentChange={(id, content) => updateNoteContent(id, content)}
+              onPositionChange={(id, x, y) => updateNotePosition(id, { x, y })}
+              onSelect={() => handleNoteSelect(note.id)}
+              isSelected={selectedNoteId === note.id}
+              selectedTool={selectedTool}
+              drawingColor={drawingColor}
+              style={{ zIndex: note.zIndex }}
+            />
+          ))}
+        </motion.div>
+      </div>
     </div>
   );
 };

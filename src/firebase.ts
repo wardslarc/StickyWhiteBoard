@@ -7,19 +7,22 @@ import {
   addDoc, 
   doc, 
   deleteDoc,
+  getDoc, // Added missing getDoc import
   setDoc,
   writeBatch,
   query,
-  where
+  where,
+  Timestamp
 } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
+import { 
+  getAuth, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signOut as firebaseSignOut 
+} from "firebase/auth";
 import { getAnalytics } from "firebase/analytics";
-import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
 
 // Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
   apiKey: "AIzaSyB4xVSbPYkq7ncQ-IOgdFKEetjow0rOvbw",
   authDomain: "stickywhiteboard.firebaseapp.com",
@@ -34,22 +37,32 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 export const auth = getAuth(app);
+const analytics = typeof window !== 'undefined' ? getAnalytics(app) : null;
+
+// Set up Google auth provider
 const provider = new GoogleAuthProvider();
 provider.setCustomParameters({
   prompt: "select_account"
 });
+
+// Auth functions
 export const signInWithGoogle = () => signInWithPopup(auth, provider);
 export const signOut = () => firebaseSignOut(auth);
 
-// Export Firestore functions
+// Export Firestore functions as named exports
 export { 
   collection, 
   onSnapshot, 
   addDoc, 
   doc, 
   deleteDoc,
+  getDoc, // Added to exports
   setDoc,
   writeBatch,
   query,
-  where
+  where,
+  Timestamp
 };
+
+// Export types for better type safety
+export type FirestoreTimestamp = Timestamp;
