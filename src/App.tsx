@@ -7,7 +7,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import UserProfile from "./components/userProfile/Profile";
 
 // Admin layout and sub-pages
-import AdminLayout from "./components/admin/admin";
+import AdminLayout from "./components/admin/Admin";
 import ContentModeration from "./components/admin/ContentModeration";
 import DashboardOverview from "./components/admin/DashboardOverview";
 import Settings from "./components/admin/Settings";
