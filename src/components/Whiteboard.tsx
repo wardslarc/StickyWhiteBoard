@@ -16,6 +16,7 @@ import {
   Timestamp,
   updateDoc
 } from "../firebase";
+import { getDatabase, ref, set, onDisconnect, onValue, off, update, remove } from "firebase/database";
 import { DrawingPath, Shape, Note, Position, Board } from "./whiteboardTypes";
 import { getAuth } from "firebase/auth";
 import { useParams, useNavigate } from "react-router-dom";
@@ -38,6 +39,9 @@ const Whiteboard = () => {
   const whiteboardRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [noteCreationColor, setNoteCreationColor] = useState<string>("#ffcc80");
+  const [collaborators, setCollaborators] = useState<{id: string, name: string}[]>([]);
+  const [cursors, setCursors] = useState<{[key: string]: Position}>({});
+  const rtdb = getDatabase();
   
   const eraserSelectionRef = useRef<{ 
     paths: Set<string>; 
@@ -80,6 +84,83 @@ const Whiteboard = () => {
     });
     return unsubscribe;
   }, [boardId]);
+
+  // Setup presence tracking
+  useEffect(() => {
+    if (!boardId || !userId) return;
+    
+    const presenceRef = ref(rtdb, `presence/${boardId}/${userId}`);
+    
+    // Set presence when user connects
+    set(presenceRef, {
+      userId,
+      name: `User${userId.slice(0, 5)}`,
+      lastActive: Date.now()
+    });
+    
+    // Remove presence when user disconnects
+    onDisconnect(presenceRef).remove();
+    
+    // Listen for other collaborators' presence
+    const collaboratorsRef = ref(rtdb, `presence/${boardId}`);
+    const unsubscribeCollaborators = onValue(collaboratorsRef, (snapshot) => {
+      const users = snapshot.val();
+      if (!users) {
+        setCollaborators([]);
+        return;
+      }
+      
+      const activeUsers = Object.values(users)
+        .filter((user: any) => user.userId !== userId)
+        .map((user: any) => ({
+          id: user.userId,
+          name: user.name
+        }));
+      
+      setCollaborators(activeUsers);
+    });
+    
+    // Cleanup on unmount
+    return () => {
+      remove(presenceRef);
+      off(collaboratorsRef);
+    };
+  }, [boardId, userId, rtdb]);
+
+  // Setup cursor tracking
+  useEffect(() => {
+    if (!boardId || !userId || !whiteboardRef.current) return;
+    
+    const cursorRef = ref(rtdb, `cursors/${boardId}/${userId}`);
+    
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!whiteboardRef.current) return;
+      
+      const rect = whiteboardRef.current.getBoundingClientRect();
+      const position = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
+      
+      update(cursorRef, position);
+    };
+    
+    window.addEventListener('mousemove', handleMouseMove);
+    
+    // Listen for other collaborators' cursors
+    const cursorsRef = ref(rtdb, `cursors/${boardId}`);
+    const unsubscribeCursors = onValue(cursorsRef, (snapshot) => {
+      const cursorData = snapshot.val();
+      setCursors(cursorData || {});
+    });
+    
+    // Cleanup on unmount
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      remove(cursorRef);
+      off(cursorsRef);
+    };
+  }, [boardId, userId, rtdb]);
 
   // Firebase collection references with board ID
   const getNotesRef = () => query(
@@ -592,6 +673,47 @@ const Whiteboard = () => {
     [drawingPaths, shapes]
   );
 
+  // Draw collaborator cursors
+  const drawCollaboratorCursors = (ctx: CanvasRenderingContext2D) => {
+    Object.entries(cursors).forEach(([collaboratorId, position]) => {
+      if (collaboratorId === userId) return;
+      
+      const collaborator = collaborators.find(c => c.id === collaboratorId);
+      if (!collaborator) return;
+      
+      // Draw cursor
+      ctx.strokeStyle = "#3B82F6";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(position.x, position.y, 6, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      // Draw cursor line
+      ctx.beginPath();
+      ctx.moveTo(position.x, position.y - 12);
+      ctx.lineTo(position.x, position.y + 12);
+      ctx.moveTo(position.x - 12, position.y);
+      ctx.lineTo(position.x + 12, position.y);
+      ctx.stroke();
+      
+      // Draw name tag
+      ctx.fillStyle = "#3B82F6";
+      ctx.font = "12px sans-serif";
+      const textWidth = ctx.measureText(collaborator.name).width;
+      
+      ctx.fillRect(
+        position.x - textWidth / 2 - 5,
+        position.y - 30,
+        textWidth + 10,
+        20
+      );
+      
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.fillText(collaborator.name, position.x, position.y - 15);
+    });
+  };
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -635,6 +757,9 @@ const Whiteboard = () => {
       
       drawSelectionPreview(ctx);
     }
+    
+    // Draw collaborator cursors
+    drawCollaboratorCursors(ctx);
   }, [
     drawingPaths,
     shapes,
@@ -646,7 +771,10 @@ const Whiteboard = () => {
     drawPath,
     drawShape,
     drawEraserPreview,
-    drawSelectionPreview
+    drawSelectionPreview,
+    cursors,
+    collaborators,
+    userId
   ]);
 
   useEffect(() => {
@@ -667,7 +795,7 @@ const Whiteboard = () => {
 
   // Save and exit function
   const handleSaveAndExit = () => {
-    navigate("/board"); // Navigate to board manager page
+    navigate("/"); // Navigate to board manager page
   };
 
   return (
@@ -702,13 +830,38 @@ const Whiteboard = () => {
                 Save & Exit
               </button>
               
-              <div className="bg-white/20 backdrop-blur-sm rounded-full p-1 flex items-center shadow-md">
-                <div className="bg-white text-indigo-700 w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg border-2 border-white">
-                  {board.userId === userId ? "U" : "C"}
+              <div className="flex items-center">
+                {/* Collaborator Avatars */}
+                <div className="flex -space-x-2 mr-4">
+                  {collaborators.slice(0, 5).map((collaborator) => (
+                    <div 
+                      key={collaborator.id}
+                      className="bg-indigo-500 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white"
+                      title={collaborator.name}
+                    >
+                      <span className="font-bold text-sm">
+                        {collaborator.name[0]}
+                      </span>
+                    </div>
+                  ))}
+                  {collaborators.length > 5 && (
+                    <div className="bg-indigo-800 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white">
+                      +{collaborators.length - 5}
+                    </div>
+                  )}
                 </div>
-                <div className="ml-3 mr-4">
-                  <p className="font-medium text-sm">{board.userId === userId ? "You" : "Collaborator"}</p>
-                  <p className="text-indigo-200 text-xs">{board.userId === userId ? "Owner" : "Editor"}</p>
+                
+                {/* Current User Avatar */}
+                <div className="bg-white/20 backdrop-blur-sm rounded-full p-1 flex items-center shadow-md">
+                  <div className="bg-white text-indigo-700 w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg border-2 border-white">
+                    {userId ? `U${userId.slice(0,1)}` : "U"}
+                  </div>
+                  <div className="ml-3 mr-4">
+                    <p className="font-medium text-sm">You</p>
+                    <p className="text-indigo-200 text-xs">
+                      {board.userId === userId ? "Owner" : "Editor"}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
