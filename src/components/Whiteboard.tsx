@@ -795,7 +795,7 @@ const Whiteboard = () => {
 
   // Save and exit function
   const handleSaveAndExit = () => {
-    navigate("/"); // Navigate to board manager page
+    navigate("/board"); // Navigate to board manager page
   };
 
   return (
