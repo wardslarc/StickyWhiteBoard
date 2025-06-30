@@ -9,18 +9,20 @@ import {
   addDoc, 
   doc, 
   deleteDoc,
-  getDoc, // Make sure this is imported
+  getDoc,
   writeBatch,
   query,
   where,
-  Timestamp
+  Timestamp,
+  updateDoc
 } from "../firebase";
 import { DrawingPath, Shape, Note, Position, Board } from "./whiteboardTypes";
 import { getAuth } from "firebase/auth";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 
 const Whiteboard = () => {
   const { id: boardId } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [userId, setUserId] = useState<string | null>(null);
   const [board, setBoard] = useState<Board | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -663,28 +665,53 @@ const Whiteboard = () => {
     return () => window.removeEventListener("resize", resizeCanvas);
   }, []);
 
+  // Save and exit function
+  const handleSaveAndExit = () => {
+    navigate("/board"); // Navigate to board manager page
+  };
+
   return (
     <div className="flex flex-col h-full w-full bg-gray-100">
-      {/* Board Header */}
+      {/* Enhanced Board Header */}
       {board && (
-        <div className="bg-white shadow-sm p-4 flex justify-between items-center">
-          <div>
-            <h1 className="text-xl font-bold">{board.title || "Untitled Board"}</h1>
-            <p className="text-gray-500 text-sm">
-              Last edited: {board.lastEdited?.toDate().toLocaleString() || "Just now"}
-            </p>
-          </div>
-          <div className="flex items-center space-x-2">
-            {userId && (
-              <div className="flex items-center">
-                <div className="w-8 h-8 rounded-full bg-gray-300 flex items-center justify-center">
-                  {board.userId === userId ? "👑" : "👤"}
-                </div>
-                <span className="ml-2">
-                  {board.userId === userId ? "You" : "Collaborator"}
-                </span>
+        <div className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white shadow-lg p-4">
+          <div className="container mx-auto flex flex-col md:flex-row justify-between items-center">
+            <div className="text-center md:text-left mb-3 md:mb-0">
+              <div className="flex items-center justify-center md:justify-start">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+                </svg>
+                <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
+                  {board.title || "Untitled Board"}
+                </h1>
               </div>
-            )}
+              <p className="text-indigo-200 mt-1 text-sm md:text-base">
+                Last edited: {board.lastEdited?.toDate().toLocaleString() || "Just now"}
+              </p>
+            </div>
+            
+            <div className="flex items-center space-x-4">
+              {/* Save and Exit Button */}
+              <button
+                onClick={handleSaveAndExit}
+                className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M9.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L7.414 9H15a1 1 0 110 2H7.414l2.293 2.293a1 1 0 010 1.414z" clipRule="evenodd" />
+                </svg>
+                Save & Exit
+              </button>
+              
+              <div className="bg-white/20 backdrop-blur-sm rounded-full p-1 flex items-center shadow-md">
+                <div className="bg-white text-indigo-700 w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg border-2 border-white">
+                  {board.userId === userId ? "U" : "C"}
+                </div>
+                <div className="ml-3 mr-4">
+                  <p className="font-medium text-sm">{board.userId === userId ? "You" : "Collaborator"}</p>
+                  <p className="text-indigo-200 text-xs">{board.userId === userId ? "Owner" : "Editor"}</p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

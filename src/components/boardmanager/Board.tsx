@@ -118,9 +118,12 @@ export default function Board() {
       <main className="container px-4 py-6">
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-3xl font-bold tracking-tight">My Boards</h2>
-          <Button onClick={() => setIsCreateDialogOpen(true)}>
-            + New Board
-          </Button>
+            {/* Create Board Dialog */}
+            <CreateBoardDialog
+              open={isCreateDialogOpen}
+              onOpenChange={setIsCreateDialogOpen}
+              userId={userId}
+            />
         </div>
 
         <BoardGrid
@@ -129,12 +132,7 @@ export default function Board() {
           onDuplicate={() => {}}
         />
         
-        {/* Create Board Dialog */}
-        <CreateBoardDialog
-          open={isCreateDialogOpen}
-          onOpenChange={setIsCreateDialogOpen}
-          userId={userId}
-        />
+    
       </main>
     </div>
   );

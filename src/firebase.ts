@@ -12,7 +12,8 @@ import {
   writeBatch,
   query,
   where,
-  Timestamp
+  Timestamp,
+  updateDoc
 } from "firebase/firestore";
 import { 
   getAuth, 
@@ -61,7 +62,8 @@ export {
   writeBatch,
   query,
   where,
-  Timestamp
+  Timestamp,
+  updateDoc
 };
 
 // Export types for better type safety
