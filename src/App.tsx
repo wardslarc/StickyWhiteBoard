@@ -1,12 +1,14 @@
 import { Suspense } from "react";
-import { useRoutes, Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import Home from "./components/homepage/home";
 import routes from "tempo-routes";
 import WhiteBoard from "./components/home";
 import ProtectedRoute from "./components/ProtectedRoute";
 import UserProfile from "./components/userProfile/Profile";
+import { Toaster } from "sonner";
+import Board from "./components/boardmanager/Board";
 
-// Admin layout and sub-pages
+// Admin components
 import AdminLayout from "./components/admin/Admin";
 import ContentModeration from "./components/admin/ContentModeration";
 import DashboardOverview from "./components/admin/DashboardOverview";
@@ -14,33 +16,42 @@ import Settings from "./components/admin/Settings";
 import SubscriptionBilling from "./components/admin/SubscriptionBilling";
 import UserManagement from "./components/admin/UserManagement";
 
-// ✅ Import the Toaster
-import { Toaster } from "sonner";
-
-//import board manager
-import Board from "./components/boardmanager/Board";
-
-
 function App() {
+  const location = useLocation();
+
+  // Redirect /board/:id to /drawing/:id while maintaining all functionality
+  if (location.pathname.startsWith('/board/') && location.pathname.split('/').length === 3) {
+    const boardId = location.pathname.split('/')[2];
+    return <Navigate to={`/drawing/${boardId}`} replace />;
+  }
+
   return (
     <Suspense fallback={<p>Loading...</p>}>
       <Routes>
-        {/* Public */}
+        {/* Public Routes */}
         <Route path="/" element={<Home />} />
 
-        {/* Board Manager */}
-        <Route path="/board" element={<ProtectedRoute><Board/></ProtectedRoute>}/>
+        {/* Board Management */}
+        <Route 
+          path="/board" 
+          element={
+            <ProtectedRoute>
+              <Board />
+            </ProtectedRoute>
+          }
+        />
 
-
-        {/* Authenticated Users */}
+        {/* Whiteboard - primary route */}
         <Route
-          path="/drawing/:id"  // Add :id parameter
+          path="/drawing/:id"
           element={
             <ProtectedRoute>
               <WhiteBoard />
             </ProtectedRoute>
           }
         />
+
+        {/* User Profile */}
         <Route
           path="/userProfile"
           element={
@@ -50,7 +61,7 @@ function App() {
           }
         />
 
-        {/* Admin layout with nested routes */}
+        {/* Admin Dashboard */}
         <Route
           path="/admin"
           element={
@@ -65,16 +76,13 @@ function App() {
           <Route path="contentmoderation" element={<ContentModeration />} />
           <Route path="settings" element={<Settings />} />
           <Route path="subscriptionbilling" element={<SubscriptionBilling />} />
-
-
         </Route>
+
+        {/* Tempo fallback routes */}
+        {import.meta.env.VITE_TEMPO === "true" && routes}
       </Routes>
 
-      {/* ✅ Global toaster rendered at the root of your app */}
-      <Toaster />
-
-      {/* Tempo fallback route system */}
-      {import.meta.env.VITE_TEMPO === "true" && useRoutes(routes)}
+      <Toaster position="top-right" richColors />
     </Suspense>
   );
 }

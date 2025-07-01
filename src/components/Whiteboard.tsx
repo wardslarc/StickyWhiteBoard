@@ -14,19 +14,24 @@ import {
   query,
   where,
   Timestamp,
-  updateDoc
+  updateDoc,
+  serverTimestamp,
+  arrayUnion
 } from "../firebase";
 import { getDatabase, ref, set, onDisconnect, onValue, off, update, remove } from "firebase/database";
 import { DrawingPath, Shape, Note, Position, Board } from "./whiteboardTypes";
 import { getAuth } from "firebase/auth";
 import { useParams, useNavigate } from "react-router-dom";
+import { throttle } from "lodash";
 
 const Whiteboard = () => {
   const { id: boardId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [userId, setUserId] = useState<string | null>(null);
+  const [userName, setUserName] = useState<string>("User");
   const [board, setBoard] = useState<Board | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [localNotePositions, setLocalNotePositions] = useState<Record<string, Position>>({});
   const [highestZIndex, setHighestZIndex] = useState<number>(0);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState<DrawingTool>("select");
@@ -36,13 +41,21 @@ const Whiteboard = () => {
   const [isDrawing, setIsDrawing] = useState<boolean>(false);
   const [currentPath, setCurrentPath] = useState<Position[]>([]);
   const [currentShape, setCurrentShape] = useState<Shape | null>(null);
+  const [activeViewers, setActiveViewers] = useState(0);
   const whiteboardRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [noteCreationColor, setNoteCreationColor] = useState<string>("#ffcc80");
-  const [collaborators, setCollaborators] = useState<{id: string, name: string}[]>([]);
+  const [collaborators, setCollaborators] = useState<{id: string, name: string, color: string}[]>([]);
   const [cursors, setCursors] = useState<{[key: string]: Position}>({});
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareLink, setShareLink] = useState("");
+  const [shareEmail, setShareEmail] = useState("");
+  const [isSharing, setIsSharing] = useState(false);
+  const [showCollaboratorsList, setShowCollaboratorsList] = useState(false);
   const rtdb = getDatabase();
   
+  const pendingPositionUpdates = useRef<Record<string, Position>>({});
+  const lastSentPositions = useRef<Record<string, Position>>({});
   const eraserSelectionRef = useRef<{ 
     paths: Set<string>; 
     shapes: Set<string> 
@@ -51,28 +64,32 @@ const Whiteboard = () => {
     shapes: new Set() 
   });
 
-  // Get current user and board data
+  // Generate a consistent color from user ID
+  const getUserColor = (id: string) => {
+    const hue = parseInt(id.slice(-3), 16) % 360;
+    return `hsl(${hue}, 70%, 60%)`;
+  };
+
+  // Initialize user and board data
   useEffect(() => {
     const auth = getAuth();
     const unsubscribe = auth.onAuthStateChanged(async user => {
       if (user) {
         setUserId(user.uid);
+        setUserName(user.displayName || `User${user.uid.slice(0, 5)}`);
         
-        // Fetch board data
         if (boardId) {
           try {
             const boardRef = doc(db, "boards", boardId);
             const boardSnap = await getDoc(boardRef);
             
             if (boardSnap.exists()) {
-              const boardData = boardSnap.data() as Board;
               setBoard({
-                ...boardData,
+                ...boardSnap.data() as Board,
                 id: boardSnap.id,
-                lastEdited: boardData.lastEdited || Timestamp.now()
+                lastEdited: (boardSnap.data() as Board).lastEdited || Timestamp.now()
               });
-            } else {
-              console.error("Board not found");
+              setShareLink(`${window.location.origin}/board/${boardId}`);
             }
           } catch (error) {
             console.error("Error loading board:", error);
@@ -90,71 +107,54 @@ const Whiteboard = () => {
     if (!boardId || !userId) return;
     
     const presenceRef = ref(rtdb, `presence/${boardId}/${userId}`);
-    
-    // Set presence when user connects
     set(presenceRef, {
       userId,
-      name: `User${userId.slice(0, 5)}`,
+      name: userName,
       lastActive: Date.now()
     });
     
-    // Remove presence when user disconnects
     onDisconnect(presenceRef).remove();
     
-    // Listen for other collaborators' presence
     const collaboratorsRef = ref(rtdb, `presence/${boardId}`);
     const unsubscribeCollaborators = onValue(collaboratorsRef, (snapshot) => {
-      const users = snapshot.val();
-      if (!users) {
-        setCollaborators([]);
-        return;
-      }
+      const users = snapshot.val() || {};
+      setActiveViewers(Object.keys(users).length);
       
-      const activeUsers = Object.values(users)
-        .filter((user: any) => user.userId !== userId)
-        .map((user: any) => ({
-          id: user.userId,
-          name: user.name
-        }));
+      const collaboratorsData = Object.entries(users).map(([id, userData]: [string, any]) => ({
+        id: userData.userId,
+        name: userData.name,
+        color: getUserColor(userData.userId)
+      })).filter(user => user.id !== userId);
       
-      setCollaborators(activeUsers);
+      setCollaborators(collaboratorsData);
     });
     
-    // Cleanup on unmount
     return () => {
       remove(presenceRef);
       off(collaboratorsRef);
     };
-  }, [boardId, userId, rtdb]);
+  }, [boardId, userId, rtdb, userName]);
 
   // Setup cursor tracking
   useEffect(() => {
     if (!boardId || !userId || !whiteboardRef.current) return;
     
     const cursorRef = ref(rtdb, `cursors/${boardId}/${userId}`);
-    
     const handleMouseMove = (e: MouseEvent) => {
       if (!whiteboardRef.current) return;
-      
       const rect = whiteboardRef.current.getBoundingClientRect();
-      const position = {
+      update(cursorRef, {
         x: e.clientX - rect.left,
         y: e.clientY - rect.top
-      };
-      
-      update(cursorRef, position);
+      });
     };
     
     window.addEventListener('mousemove', handleMouseMove);
-    
-    // Listen for other collaborators' cursors
     const cursorsRef = ref(rtdb, `cursors/${boardId}`);
     const unsubscribeCursors = onValue(cursorsRef, (snapshot) => {
-      const cursorData = snapshot.val();
-      setCursors(cursorData || {});
+      setCursors(snapshot.val() || {});
     });
     
-    // Cleanup on unmount
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       remove(cursorRef);
@@ -162,130 +162,143 @@ const Whiteboard = () => {
     };
   }, [boardId, userId, rtdb]);
 
-  // Firebase collection references with board ID
-  const getNotesRef = () => query(
-    collection(db, "notes"), 
-    where("boardId", "==", boardId)
-  );
-  
-  const getDrawingPathsRef = () => query(
-    collection(db, "drawingPaths"), 
-    where("boardId", "==", boardId)
-  );
-  
-  const getShapesRef = () => query(
-    collection(db, "shapes"), 
-    where("boardId", "==", boardId)
-  );
+  // Optimized position update with throttling
+  const updateNotePosition = useCallback((id: string, newPos: Position) => {
+    setLocalNotePositions(prev => ({ ...prev, [id]: newPos }));
+    pendingPositionUpdates.current[id] = newPos;
+    throttledSync();
+  }, []);
 
-  // Load all whiteboard data from Firestore
+  const throttledSync = useCallback(throttle(() => {
+    const updatesToSend = { ...pendingPositionUpdates.current };
+    pendingPositionUpdates.current = {};
+
+    const batch = writeBatch(db);
+    Object.entries(updatesToSend).forEach(([id, position]) => {
+      const noteRef = doc(db, "notes", id);
+      batch.update(noteRef, {
+        position,
+        updatedAt: serverTimestamp(),
+        lastUpdatedBy: userId
+      });
+      lastSentPositions.current[id] = position;
+    });
+    
+    if (Object.keys(updatesToSend).length > 0) {
+      batch.commit().catch(error => {
+        console.error("Error updating note positions:", error);
+        pendingPositionUpdates.current = { ...pendingPositionUpdates.current, ...updatesToSend };
+      });
+    }
+  }, 100), [userId]);
+
+  // Load notes with conflict resolution
   useEffect(() => {
     if (!boardId) return;
 
-    // Load notes
-    const notesUnsubscribe = onSnapshot(getNotesRef(), (snapshot) => {
-      const notesData: Note[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        notesData.push({
-          id: doc.id,
-          content: data.content,
-          position: data.position,
-          color: data.color,
-          zIndex: data.zIndex,
-          boardId: boardId
+    const notesUnsubscribe = onSnapshot(
+      query(collection(db, "notes"), where("boardId", "==", boardId)), 
+      (snapshot) => {
+        const notesData: Note[] = [];
+        const newLocalPositions: Record<string, Position> = {};
+        
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          const serverPosition = data.position || { x: 50, y: 50 };
+          
+          if (!lastSentPositions.current[doc.id] || 
+              data.updatedAt?.seconds > (lastSentPositions.current[doc.id]?.timestamp || 0) ||
+              data.lastUpdatedBy !== userId) {
+            newLocalPositions[doc.id] = serverPosition;
+          } else {
+            newLocalPositions[doc.id] = localNotePositions[doc.id] || serverPosition;
+          }
+
+          notesData.push({
+            id: doc.id,
+            content: data.content,
+            position: newLocalPositions[doc.id],
+            color: data.color,
+            zIndex: data.zIndex || 0,
+            boardId: boardId
+          });
         });
-      });
-      setNotes(notesData);
-      
-      if (notesData.length > 0) {
-        const maxZIndex = Math.max(...notesData.map(note => note.zIndex));
-        setHighestZIndex(maxZIndex);
-      } else {
-        setHighestZIndex(0);
+
+        setNotes(notesData);
+        setLocalNotePositions(newLocalPositions);
+
+        if (notesData.length > 0) {
+          setHighestZIndex(Math.max(...notesData.map(note => note.zIndex)));
+        }
       }
-    });
+    );
 
-    // Load drawing paths
-    const pathsUnsubscribe = onSnapshot(getDrawingPathsRef(), (snapshot) => {
-      const pathsData: DrawingPath[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        pathsData.push({
-          id: doc.id,
-          points: data.points,
-          color: data.color,
-          strokeWidth: data.strokeWidth,
-          tool: data.tool,
-          boardId: boardId
+    return notesUnsubscribe;
+  }, [boardId, userId, localNotePositions]);
+
+  // Load drawing paths
+  useEffect(() => {
+    if (!boardId) return;
+    
+    const pathsUnsubscribe = onSnapshot(
+      query(collection(db, "drawingPaths"), where("boardId", "==", boardId)),
+      (snapshot) => {
+        const pathsData: DrawingPath[] = [];
+        snapshot.forEach((doc) => {
+          pathsData.push({
+            ...doc.data() as DrawingPath,
+            id: doc.id
+          });
         });
-      });
-      setDrawingPaths(pathsData);
-    });
-
-    // Load shapes
-    const shapesUnsubscribe = onSnapshot(getShapesRef(), (snapshot) => {
-      const shapesData: Shape[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        shapesData.push({
-          id: doc.id,
-          type: data.type,
-          startPos: data.startPos,
-          endPos: data.endPos,
-          color: data.color,
-          strokeWidth: data.strokeWidth,
-          boardId: boardId
-        });
-      });
-      setShapes(shapesData);
-    });
-
-    return () => {
-      notesUnsubscribe();
-      pathsUnsubscribe();
-      shapesUnsubscribe();
-    };
+        setDrawingPaths(pathsData);
+      }
+    );
+    
+    return pathsUnsubscribe;
   }, [boardId]);
 
-  // Update board lastEdited timestamp when changes occur
+  // Load shapes
   useEffect(() => {
-    if (!boardId || !board) return;
+    if (!boardId) return;
     
-    const updateBoardTimestamp = async () => {
-      try {
-        const boardRef = doc(db, "boards", boardId);
-        await updateDoc(boardRef, {
-          lastEdited: Timestamp.now()
+    const shapesUnsubscribe = onSnapshot(
+      query(collection(db, "shapes"), where("boardId", "==", boardId)),
+      (snapshot) => {
+        const shapesData: Shape[] = [];
+        snapshot.forEach((doc) => {
+          shapesData.push({
+            ...doc.data() as Shape,
+            id: doc.id
+          });
         });
-        // Update local state to reflect new timestamp
-        setBoard(prev => prev ? {
-          ...prev,
-          lastEdited: Timestamp.now()
-        } : null);
-      } catch (error) {
-        console.error("Error updating board timestamp:", error);
+        setShapes(shapesData);
       }
-    };
+    );
     
-    updateBoardTimestamp();
-  }, [notes, drawingPaths, shapes, boardId, board]);
+    return shapesUnsubscribe;
+  }, [boardId]);
+
+  // Merge local and remote note positions
+  const mergedNotes = notes.map(note => ({
+    ...note,
+    position: localNotePositions[note.id] || note.position
+  }));
 
   // Add a new sticky note
   const addNote = async () => {
     if (!boardId) return;
     
     const newZIndex = highestZIndex + 1;
-    const newNote = {
-      content: "New note",
-      position: { x: 50, y: 50 },
-      color: noteCreationColor,
-      zIndex: newZIndex,
-      boardId: boardId
-    };
-
     try {
-      await addDoc(collection(db, "notes"), newNote);
+      await addDoc(collection(db, "notes"), {
+        content: "New note",
+        position: { x: 50, y: 50 },
+        color: noteCreationColor,
+        zIndex: newZIndex,
+        boardId: boardId,
+        updatedAt: serverTimestamp(),
+        lastUpdatedBy: userId
+      });
     } catch (error) {
       console.error("Error adding note:", error);
     }
@@ -303,10 +316,106 @@ const Whiteboard = () => {
     }
   };
 
-  // Add a new drawing path
+  // Bring note to front
+  const bringToFront = async (id: string) => {
+    const newZIndex = highestZIndex + 1;
+    try {
+      await updateDoc(doc(db, "notes", id), {
+        zIndex: newZIndex,
+        updatedAt: serverTimestamp(),
+        lastUpdatedBy: userId
+      });
+      setHighestZIndex(newZIndex);
+    } catch (error) {
+      console.error("Error bringing note to front:", error);
+    }
+  };
+
+  // Update note content
+  const updateNoteContent = async (id: string, content: string) => {
+    try {
+      await updateDoc(doc(db, "notes", id), {
+        content,
+        updatedAt: serverTimestamp(),
+        lastUpdatedBy: userId
+      });
+    } catch (error) {
+      console.error("Error updating note content:", error);
+    }
+  };
+
+  // Update note color
+  const updateNoteColor = async (id: string, color: string) => {
+    try {
+      await updateDoc(doc(db, "notes", id), {
+        color,
+        updatedAt: serverTimestamp(),
+        lastUpdatedBy: userId
+      });
+    } catch (error) {
+      console.error("Error updating note color:", error);
+    }
+  };
+
+  // Handle color change from toolbar
+  const handleColorChange = (color: string) => {
+    if (selectedNoteId) {
+      updateNoteColor(selectedNoteId, color);
+    }
+  };
+
+  // Handle delete from toolbar
+  const handleDelete = () => {
+    if (selectedNoteId) {
+      deleteNote(selectedNoteId);
+    }
+  };
+
+  // Handle increase size from toolbar
+  const handleIncreaseSize = () => {
+    console.log("Increase size functionality");
+  };
+
+  // Handle decrease size from toolbar
+  const handleDecreaseSize = () => {
+    console.log("Decrease size functionality");
+  };
+
+  // Handle save and exit
+  const handleSaveAndExit = async () => {
+    try {
+      if (boardId) {
+        await updateDoc(doc(db, "boards", boardId), {
+          lastEdited: Timestamp.now()
+        });
+      }
+    } catch (error) {
+      console.error("Error saving board:", error);
+    }
+    navigate("/board");
+  };
+
+  // Share board with another user
+  const handleShareBoard = async () => {
+    if (!boardId || !shareEmail) return;
+    
+    setIsSharing(true);
+    try {
+      await updateDoc(doc(db, "boards", boardId), {
+        sharedWith: arrayUnion(shareEmail)
+      });
+      setShareEmail("");
+      setShowShareModal(false);
+    } catch (error) {
+      console.error("Error sharing board:", error);
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  // Drawing functions
   const addDrawingPath = async (path: Omit<DrawingPath, 'id'>) => {
     if (!boardId) return;
-    
     try {
       await addDoc(collection(db, "drawingPaths"), {
         ...path,
@@ -317,10 +426,8 @@ const Whiteboard = () => {
     }
   };
 
-  // Add a new shape
   const addShape = async (shape: Omit<Shape, 'id'>) => {
     if (!boardId) return;
-    
     try {
       await addDoc(collection(db, "shapes"), {
         ...shape,
@@ -331,30 +438,18 @@ const Whiteboard = () => {
     }
   };
 
-  // Delete drawing elements from Firebase
   const deleteDrawingElements = async (paths: string[], shapes: string[]) => {
     if (paths.length === 0 && shapes.length === 0) return;
-    
     try {
       const batch = writeBatch(db);
-      
-      paths.forEach(pathId => {
-        const pathRef = doc(db, "drawingPaths", pathId);
-        batch.delete(pathRef);
-      });
-      
-      shapes.forEach(shapeId => {
-        const shapeRef = doc(db, "shapes", shapeId);
-        batch.delete(shapeRef);
-      });
-      
+      paths.forEach(pathId => batch.delete(doc(db, "drawingPaths", pathId)));
+      shapes.forEach(shapeId => batch.delete(doc(db, "shapes", shapeId)));
       await batch.commit();
     } catch (error) {
       console.error("Error deleting drawing elements:", error);
     }
   };
 
-  // Check if a point is near a shape
   const isPointNearShape = (point: Position, shape: Shape, threshold: number = 10) => {
     if (shape.type === "rectangle") {
       const minX = Math.min(shape.startPos.x, shape.endPos.x) - threshold;
@@ -370,23 +465,22 @@ const Whiteboard = () => {
       const centerX = (shape.startPos.x + shape.endPos.x) / 2;
       const centerY = (shape.startPos.y + shape.endPos.y) / 2;
       const radius = Math.sqrt(
-        (shape.endPos.x - shape.startPos.x) ** 2 + 
-        (shape.endPos.y - shape.startPos.y) ** 2
+        Math.pow(shape.endPos.x - shape.startPos.x, 2) + 
+        Math.pow(shape.endPos.y - shape.startPos.y, 2)
       ) / 2;
       
-      const distance = Math.sqrt((point.x - centerX) ** 2 + (point.y - centerY) ** 2);
+      const distance = Math.sqrt(Math.pow(point.x - centerX, 2) + Math.pow(point.y - centerY, 2));
       return Math.abs(distance - radius) <= threshold;
     }
     return false;
   };
 
-  // Handle eraser selection
   const handleEraserSelection = (point: Position) => {
     let found = false;
 
     drawingPaths.forEach(path => {
       if (path.points.some(p => 
-        Math.sqrt((p.x - point.x)**2 + (p.y - point.y)**2) < 10
+        Math.sqrt(Math.pow(p.x - point.x, 2) + Math.pow(p.y - point.y, 2)) < 10
       )) {
         eraserSelectionRef.current.paths.add(path.id);
         found = true;
@@ -401,69 +495,6 @@ const Whiteboard = () => {
     });
 
     return found;
-  };
-
-  // Local state updates
-  const updateNotePosition = (id: string, position: Position) => {
-    setNotes(
-      notes.map((note) => (note.id === id ? { ...note, position } : note)),
-    );
-  };
-
-  const updateNoteContent = (id: string, content: string) => {
-    setNotes(
-      notes.map((note) => (note.id === id ? { ...note, content } : note)),
-    );
-  };
-
-  const updateNoteColor = (id: string, color: string) => {
-    setNotes(notes.map((note) => (note.id === id ? { ...note, color } : note)));
-  };
-
-  const bringToFront = (id: string) => {
-    const newZIndex = highestZIndex + 1;
-    setNotes(
-      notes.map((note) =>
-        note.id === id ? { ...note, zIndex: newZIndex } : note,
-      ),
-    );
-    setHighestZIndex(newZIndex);
-  };
-
-  const handleNoteSelect = (id: string) => {
-    setSelectedNoteId(id);
-    bringToFront(id);
-  };
-
-  const handleColorChange = (color: string) => {
-    if (selectedNoteId) {
-      updateNoteColor(selectedNoteId, color);
-    }
-  };
-
-  const handleDelete = () => {
-    if (selectedNoteId) {
-      deleteNote(selectedNoteId);
-    }
-  };
-
-  const handleIncreaseSize = () => {
-    // TODO: Implement size increase functionality
-  };
-
-  const handleDecreaseSize = () => {
-    // TODO: Implement size decrease functionality
-  };
-
-  const handleToolChange = (tool: DrawingTool) => {
-    setSelectedTool(tool);
-    if (tool !== "select") {
-      setSelectedNoteId(null);
-    }
-  };
-
-  const handleDrawingColorChange = (color: string) => {
-    setDrawingColor(color);
   };
 
   const getMousePosition = useCallback((e: React.MouseEvent) => {
@@ -491,14 +522,13 @@ const Whiteboard = () => {
       }
 
       if (selectedTool === "rectangle" || selectedTool === "circle") {
-        const newShape: Omit<Shape, 'id'> = {
+        setCurrentShape({
           type: selectedTool,
           startPos: pos,
           endPos: pos,
           color: drawingColor,
           strokeWidth: selectedTool === "brush" ? 4 : 2,
-        };
-        setCurrentShape(newShape as Shape);
+        });
         setIsDrawing(true);
       } else {
         setIsDrawing(true);
@@ -673,7 +703,6 @@ const Whiteboard = () => {
     [drawingPaths, shapes]
   );
 
-  // Draw collaborator cursors
   const drawCollaboratorCursors = (ctx: CanvasRenderingContext2D) => {
     Object.entries(cursors).forEach(([collaboratorId, position]) => {
       if (collaboratorId === userId) return;
@@ -681,36 +710,51 @@ const Whiteboard = () => {
       const collaborator = collaborators.find(c => c.id === collaboratorId);
       if (!collaborator) return;
       
-      // Draw cursor
-      ctx.strokeStyle = "#3B82F6";
+      ctx.shadowColor = collaborator.color;
+      ctx.shadowBlur = 15;
+      ctx.fillStyle = collaborator.color;
+      ctx.beginPath();
+      ctx.arc(position.x, position.y, 8, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.shadowColor = 'transparent';
+      ctx.fillStyle = 'white';
+      ctx.beginPath();
+      ctx.arc(position.x, position.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.strokeStyle = 'white';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(position.x, position.y, 6, 0, Math.PI * 2);
+      ctx.moveTo(position.x, position.y - 15);
+      ctx.lineTo(position.x, position.y + 15);
+      ctx.moveTo(position.x - 15, position.y);
+      ctx.lineTo(position.x + 15, position.y);
       ctx.stroke();
       
-      // Draw cursor line
-      ctx.beginPath();
-      ctx.moveTo(position.x, position.y - 12);
-      ctx.lineTo(position.x, position.y + 12);
-      ctx.moveTo(position.x - 12, position.y);
-      ctx.lineTo(position.x + 12, position.y);
-      ctx.stroke();
-      
-      // Draw name tag
-      ctx.fillStyle = "#3B82F6";
-      ctx.font = "12px sans-serif";
+      ctx.font = "bold 12px sans-serif";
       const textWidth = ctx.measureText(collaborator.name).width;
+      const tagPadding = 8;
+      const tagHeight = 20;
+      const tagY = position.y - 35;
       
-      ctx.fillRect(
-        position.x - textWidth / 2 - 5,
-        position.y - 30,
-        textWidth + 10,
-        20
-      );
+      ctx.fillStyle = collaborator.color;
+      const tagX = position.x - textWidth/2 - tagPadding;
+      ctx.beginPath();
+      ctx.roundRect(tagX, tagY, textWidth + tagPadding*2, tagHeight, 10);
+      ctx.fill();
       
       ctx.fillStyle = "white";
       ctx.textAlign = "center";
-      ctx.fillText(collaborator.name, position.x, position.y - 15);
+      ctx.textBaseline = "middle";
+      ctx.fillText(collaborator.name, position.x, tagY + tagHeight/2);
+      
+      ctx.strokeStyle = collaborator.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(position.x, position.y - 8);
+      ctx.lineTo(position.x, tagY + tagHeight);
+      ctx.stroke();
     });
   };
 
@@ -726,39 +770,33 @@ const Whiteboard = () => {
     drawingPaths.forEach((path) => drawPath(ctx, path));
     shapes.forEach((shape) => drawShape(ctx, shape));
 
-    if (
-      isDrawing &&
-      currentPath.length > 1 &&
-      selectedTool !== "rectangle" &&
-      selectedTool !== "circle" &&
-      selectedTool !== "eraser"
-    ) {
-      const strokeWidth =
-        selectedTool === "brush" ? 4 : selectedTool === "eraser" ? 8 : 2;
-      const tempPath: DrawingPath = {
-        id: "temp",
-        points: currentPath,
-        color: drawingColor,
-        strokeWidth,
-        tool: selectedTool,
-      };
-      drawPath(ctx, tempPath);
-    }
+    if (isDrawing) {
+      if (currentPath.length > 1 && 
+          selectedTool !== "rectangle" && 
+          selectedTool !== "circle" && 
+          selectedTool !== "eraser") {
+        const tempPath: DrawingPath = {
+          id: "temp",
+          points: currentPath,
+          color: drawingColor,
+          strokeWidth: selectedTool === "brush" ? 4 : 2,
+          tool: selectedTool,
+        };
+        drawPath(ctx, tempPath);
+      }
 
-    if (isDrawing && currentShape) {
-      drawShape(ctx, currentShape);
-    }
-    
-    if (selectedTool === "eraser" && isDrawing) {
-      if (currentPath.length > 0) {
-        const lastPoint = currentPath[currentPath.length - 1];
-        drawEraserPreview(ctx, lastPoint);
+      if (currentShape) {
+        drawShape(ctx, currentShape);
       }
       
-      drawSelectionPreview(ctx);
+      if (selectedTool === "eraser") {
+        if (currentPath.length > 0) {
+          drawEraserPreview(ctx, currentPath[currentPath.length - 1]);
+        }
+        drawSelectionPreview(ctx);
+      }
     }
     
-    // Draw collaborator cursors
     drawCollaboratorCursors(ctx);
   }, [
     drawingPaths,
@@ -793,14 +831,8 @@ const Whiteboard = () => {
     return () => window.removeEventListener("resize", resizeCanvas);
   }, []);
 
-  // Save and exit function
-  const handleSaveAndExit = () => {
-    navigate("/board"); // Navigate to board manager page
-  };
-
   return (
     <div className="flex flex-col h-full w-full bg-gray-100">
-      {/* Enhanced Board Header */}
       {board && (
         <div className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white shadow-lg p-4">
           <div className="container mx-auto flex flex-col md:flex-row justify-between items-center">
@@ -819,7 +851,16 @@ const Whiteboard = () => {
             </div>
             
             <div className="flex items-center space-x-4">
-              {/* Save and Exit Button */}
+              <button
+                onClick={() => setShowShareModal(true)}
+                className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M15 8a3 3 0 10-2.977-2.63l-4.94 2.47a3 3 0 100 4.319l4.94 2.47a3 3 0 10.895-1.789l-4.94-2.47a3.027 3.027 0 000-.74l4.94-2.47C13.456 7.68 14.19 8 15 8z" />
+                </svg>
+                Share
+              </button>
+              
               <button
                 onClick={handleSaveAndExit}
                 className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
@@ -831,30 +872,80 @@ const Whiteboard = () => {
               </button>
               
               <div className="flex items-center">
-                {/* Collaborator Avatars */}
-                <div className="flex -space-x-2 mr-4">
-                  {collaborators.slice(0, 5).map((collaborator) => (
+                <div className="flex -space-x-2 mr-4 relative">
+                  {/* Current user */}
+                  <div 
+                    className="relative bg-white text-indigo-700 w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200"
+                    title="You"
+                  >
+                    <span className="font-bold text-sm">
+                      {userName[0].toUpperCase()}
+                    </span>
+                    <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
+                  </div>
+                  
+                  {/* Other collaborators */}
+                  {collaborators.slice(0, 4).map((collaborator) => (
                     <div 
                       key={collaborator.id}
-                      className="bg-indigo-500 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white"
+                      className="relative w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200"
+                      style={{ backgroundColor: collaborator.color }}
                       title={collaborator.name}
                     >
-                      <span className="font-bold text-sm">
-                        {collaborator.name[0]}
+                      <span className="font-bold text-sm text-white">
+                        {collaborator.name[0].toUpperCase()}
                       </span>
+                      <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
                     </div>
                   ))}
-                  {collaborators.length > 5 && (
-                    <div className="bg-indigo-800 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white">
-                      +{collaborators.length - 5}
+                  
+                  {/* More collaborators indicator */}
+                  {collaborators.length > 4 && (
+                    <div 
+                      className="relative bg-indigo-800 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200 cursor-pointer"
+                      onClick={() => setShowCollaboratorsList(!showCollaboratorsList)}
+                    >
+                      +{collaborators.length - 4}
+                      <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
+                    </div>
+                  )}
+                  
+                  {/* Collaborators list popover */}
+                  {showCollaboratorsList && collaborators.length > 4 && (
+                    <div className="absolute right-0 top-10 z-50 w-48 bg-white rounded-md shadow-lg py-1">
+                      <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b">
+                        Collaborators ({collaborators.length + 1})
+                      </div>
+                      <div className="max-h-60 overflow-y-auto">
+                        {/* Current user */}
+                        <div className="px-4 py-2 text-sm text-gray-700 flex items-center">
+                          <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center mr-2">
+                            {userName[0].toUpperCase()}
+                          </div>
+                          You (Owner)
+                        </div>
+                        
+                        {/* Other collaborators */}
+                        {collaborators.map((collaborator) => (
+                          <div key={collaborator.id} className="px-4 py-2 text-sm text-gray-700 flex items-center">
+                            <div 
+                              className="w-6 h-6 rounded-full flex items-center justify-center mr-2 text-white"
+                              style={{ backgroundColor: collaborator.color }}
+                            >
+                              {collaborator.name[0].toUpperCase()}
+                            </div>
+                            {collaborator.name}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
                 
-                {/* Current User Avatar */}
+                {/* User info box */}
                 <div className="bg-white/20 backdrop-blur-sm rounded-full p-1 flex items-center shadow-md">
                   <div className="bg-white text-indigo-700 w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg border-2 border-white">
-                    {userId ? `U${userId.slice(0,1)}` : "U"}
+                    {userName[0].toUpperCase()}
                   </div>
                   <div className="ml-3 mr-4">
                     <p className="font-medium text-sm">You</p>
@@ -864,6 +955,74 @@ const Whiteboard = () => {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Share Modal */}
+      {showShareModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold">Share this board</h3>
+              <button 
+                onClick={() => setShowShareModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Invite by email
+              </label>
+              <div className="flex">
+                <input
+                  type="email"
+                  value={shareEmail}
+                  onChange={(e) => setShareEmail(e.target.value)}
+                  placeholder="Enter email address"
+                  className="flex-grow px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                />
+                <button
+                  onClick={handleShareBoard}
+                  disabled={isSharing || !shareEmail}
+                  className="ml-2 bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isSharing ? "Sending..." : "Invite"}
+                </button>
+              </div>
+            </div>
+            
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Or share this link
+              </label>
+              <div className="flex">
+                <input
+                  type="text"
+                  readOnly
+                  value={shareLink}
+                  className="flex-grow px-3 py-2 border border-gray-300 rounded-l-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(shareLink);
+                    // You might want to add a toast notification here
+                  }}
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-r-md hover:bg-indigo-700"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+            
+            <div className="text-sm text-gray-500">
+              Anyone with the link can view and edit this board.
             </div>
           </div>
         </div>
@@ -879,7 +1038,7 @@ const Whiteboard = () => {
             onDecreaseSize={handleDecreaseSize}
             selectedNoteId={selectedNoteId}
             selectedTool={selectedTool}
-            onToolChange={handleToolChange}
+            onToolChange={setSelectedTool}
             drawingColor={drawingColor}
             noteCreationColor={noteCreationColor}
             onNoteCreationColorChange={setNoteCreationColor}
@@ -903,7 +1062,7 @@ const Whiteboard = () => {
             ref={canvasRef}
             className="absolute inset-0 pointer-events-none z-10"
           />
-          {notes.map((note) => (
+          {mergedNotes.map((note) => (
             <StickyNote
               key={note.id}
               id={note.id}
@@ -914,7 +1073,10 @@ const Whiteboard = () => {
               onDelete={() => deleteNote(note.id)}
               onContentChange={(id, content) => updateNoteContent(id, content)}
               onPositionChange={(id, x, y) => updateNotePosition(id, { x, y })}
-              onSelect={() => handleNoteSelect(note.id)}
+              onSelect={() => {
+                setSelectedNoteId(note.id);
+                bringToFront(note.id);
+              }}
               isSelected={selectedNoteId === note.id}
               selectedTool={selectedTool}
               drawingColor={drawingColor}

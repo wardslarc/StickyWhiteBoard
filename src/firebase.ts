@@ -13,7 +13,9 @@ import {
   query,
   where,
   Timestamp,
-  updateDoc
+  updateDoc,
+  serverTimestamp,
+  arrayUnion
 } from "firebase/firestore";
 import { 
   getAuth, 
@@ -25,15 +27,14 @@ import { getAnalytics } from "firebase/analytics";
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyB4xVSbPYkq7ncQ-IOgdFKEetjow0rOvbw",
-  authDomain: "stickywhiteboard.firebaseapp.com",
-  projectId: "stickywhiteboard",
-  storageBucket: "stickywhiteboard.firebasestorage.app",
-  messagingSenderId: "58339019690",
-  appId: "1:58339019690:web:be47636dbd716a9d0eb9d3",
-  measurementId: "G-B8PJW6XW9P"
+  apiKey: "AIzaSyCihWmdYsInRm8QNYC3-lbc9OwomhQxpHQ",
+  authDomain: "stickyboard-3a202.firebaseapp.com",
+  projectId: "stickyboard-3a202",
+  storageBucket: "stickyboard-3a202.firebasestorage.app",
+  messagingSenderId: "549664351902",
+  appId: "1:549664351902:web:fd0123b07951353cab3d8f",
+  measurementId: "G-V8FN3DTZW1"
 };
-
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
@@ -63,7 +64,9 @@ export {
   query,
   where,
   Timestamp,
-  updateDoc
+  updateDoc,
+  serverTimestamp,
+  arrayUnion
 };
 
 // Export types for better type safety
