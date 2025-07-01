@@ -22,7 +22,6 @@ import { getDatabase, ref, set, onDisconnect, onValue, off, update, remove } fro
 import { DrawingPath, Shape, Note, Position, Board } from "./whiteboardTypes";
 import { getAuth } from "firebase/auth";
 import { useParams, useNavigate } from "react-router-dom";
-import { throttle } from "lodash";
 
 const Whiteboard = () => {
   const { id: boardId } = useParams<{ id: string }>();
@@ -31,7 +30,7 @@ const Whiteboard = () => {
   const [userName, setUserName] = useState<string>("User");
   const [board, setBoard] = useState<Board | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
-  const [localNotePositions, setLocalNotePositions] = useState<Record<string, Position>>({});
+  const [notePositions, setNotePositions] = useState<Record<string, Position>>({});
   const [highestZIndex, setHighestZIndex] = useState<number>(0);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState<DrawingTool>("select");
@@ -54,8 +53,6 @@ const Whiteboard = () => {
   const [showCollaboratorsList, setShowCollaboratorsList] = useState(false);
   const rtdb = getDatabase();
   
-  const pendingPositionUpdates = useRef<Record<string, Position>>({});
-  const lastSentPositions = useRef<Record<string, Position>>({});
   const eraserSelectionRef = useRef<{ 
     paths: Set<string>; 
     shapes: Set<string> 
@@ -162,37 +159,51 @@ const Whiteboard = () => {
     };
   }, [boardId, userId, rtdb]);
 
-  // Optimized position update with throttling
+  // Real-time position updates for sticky notes
   const updateNotePosition = useCallback((id: string, newPos: Position) => {
-    setLocalNotePositions(prev => ({ ...prev, [id]: newPos }));
-    pendingPositionUpdates.current[id] = newPos;
-    throttledSync();
-  }, []);
+    // Update local state immediately
+    setNotePositions(prev => ({ ...prev, [id]: newPos }));
+    
+    // Update Realtime DB for instant sync
+    const positionRef = ref(rtdb, `notePositions/${boardId}/${id}`);
+    update(positionRef, {
+      x: newPos.x,
+      y: newPos.y,
+      updatedBy: userId,
+      timestamp: Date.now()
+    });
 
-  const throttledSync = useCallback(throttle(() => {
-    const updatesToSend = { ...pendingPositionUpdates.current };
-    pendingPositionUpdates.current = {};
+    // Update Firestore for persistence
+    updateDoc(doc(db, "notes", id), {
+      position: newPos,
+      updatedAt: serverTimestamp(),
+      lastUpdatedBy: userId
+    }).catch(console.error);
+  }, [userId, boardId, rtdb]);
 
-    const batch = writeBatch(db);
-    Object.entries(updatesToSend).forEach(([id, position]) => {
-      const noteRef = doc(db, "notes", id);
-      batch.update(noteRef, {
-        position,
-        updatedAt: serverTimestamp(),
-        lastUpdatedBy: userId
+  // Listen for real-time position changes
+  useEffect(() => {
+    if (!boardId) return;
+    
+    const positionsRef = ref(rtdb, `notePositions/${boardId}`);
+    const unsubscribe = onValue(positionsRef, (snapshot) => {
+      const positions = snapshot.val() || {};
+      setNotePositions(prev => {
+        const newPositions = {...prev};
+        Object.entries(positions).forEach(([id, posData]: [string, any]) => {
+          // Only update if we're not the ones moving this note
+          if (posData.updatedBy !== userId) {
+            newPositions[id] = { x: posData.x, y: posData.y };
+          }
+        });
+        return newPositions;
       });
-      lastSentPositions.current[id] = position;
     });
     
-    if (Object.keys(updatesToSend).length > 0) {
-      batch.commit().catch(error => {
-        console.error("Error updating note positions:", error);
-        pendingPositionUpdates.current = { ...pendingPositionUpdates.current, ...updatesToSend };
-      });
-    }
-  }, 100), [userId]);
+    return () => off(positionsRef);
+  }, [boardId, userId, rtdb]);
 
-  // Load notes with conflict resolution
+  // Load notes with initial positions
   useEffect(() => {
     if (!boardId) return;
 
@@ -200,24 +211,17 @@ const Whiteboard = () => {
       query(collection(db, "notes"), where("boardId", "==", boardId)), 
       (snapshot) => {
         const notesData: Note[] = [];
-        const newLocalPositions: Record<string, Position> = {};
+        const initialPositions: Record<string, Position> = {};
         
         snapshot.forEach((doc) => {
           const data = doc.data();
           const serverPosition = data.position || { x: 50, y: 50 };
-          
-          if (!lastSentPositions.current[doc.id] || 
-              data.updatedAt?.seconds > (lastSentPositions.current[doc.id]?.timestamp || 0) ||
-              data.lastUpdatedBy !== userId) {
-            newLocalPositions[doc.id] = serverPosition;
-          } else {
-            newLocalPositions[doc.id] = localNotePositions[doc.id] || serverPosition;
-          }
+          initialPositions[doc.id] = serverPosition;
 
           notesData.push({
             id: doc.id,
             content: data.content,
-            position: newLocalPositions[doc.id],
+            position: serverPosition,
             color: data.color,
             zIndex: data.zIndex || 0,
             boardId: boardId
@@ -225,7 +229,7 @@ const Whiteboard = () => {
         });
 
         setNotes(notesData);
-        setLocalNotePositions(newLocalPositions);
+        setNotePositions(prev => ({ ...prev, ...initialPositions }));
 
         if (notesData.length > 0) {
           setHighestZIndex(Math.max(...notesData.map(note => note.zIndex)));
@@ -234,7 +238,7 @@ const Whiteboard = () => {
     );
 
     return notesUnsubscribe;
-  }, [boardId, userId, localNotePositions]);
+  }, [boardId]);
 
   // Load drawing paths
   useEffect(() => {
@@ -278,10 +282,20 @@ const Whiteboard = () => {
     return shapesUnsubscribe;
   }, [boardId]);
 
-  // Merge local and remote note positions
+  // Cleanup realtime positions when unmounting
+  useEffect(() => {
+    return () => {
+      if (boardId && userId) {
+        const positionsRef = ref(rtdb, `notePositions/${boardId}/${userId}`);
+        remove(positionsRef).catch(console.error);
+      }
+    };
+  }, [boardId, userId, rtdb]);
+
+  // Merge notes with their current positions
   const mergedNotes = notes.map(note => ({
     ...note,
-    position: localNotePositions[note.id] || note.position
+    position: notePositions[note.id] || note.position
   }));
 
   // Add a new sticky note
@@ -289,16 +303,30 @@ const Whiteboard = () => {
     if (!boardId) return;
     
     const newZIndex = highestZIndex + 1;
+    const initialPosition = { x: 50, y: 50 };
+    
     try {
-      await addDoc(collection(db, "notes"), {
+      const newNoteRef = await addDoc(collection(db, "notes"), {
         content: "New note",
-        position: { x: 50, y: 50 },
+        position: initialPosition,
         color: noteCreationColor,
         zIndex: newZIndex,
         boardId: boardId,
         updatedAt: serverTimestamp(),
         lastUpdatedBy: userId
       });
+      
+      // Initialize realtime position
+      const positionRef = ref(rtdb, `notePositions/${boardId}/${newNoteRef.id}`);
+      set(positionRef, {
+        x: initialPosition.x,
+        y: initialPosition.y,
+        updatedBy: userId,
+        timestamp: Date.now()
+      });
+      
+      // Update local state
+      setNotePositions(prev => ({ ...prev, [newNoteRef.id]: initialPosition }));
     } catch (error) {
       console.error("Error adding note:", error);
     }
@@ -308,6 +336,17 @@ const Whiteboard = () => {
   const deleteNote = async (id: string) => {
     try {
       await deleteDoc(doc(db, "notes", id));
+      // Remove from realtime positions
+      const positionRef = ref(rtdb, `notePositions/${boardId}/${id}`);
+      remove(positionRef).catch(console.error);
+      
+      // Update local state
+      setNotePositions(prev => {
+        const newPositions = {...prev};
+        delete newPositions[id];
+        return newPositions;
+      });
+      
       if (selectedNoteId === id) {
         setSelectedNoteId(null);
       }
@@ -850,33 +889,44 @@ const Whiteboard = () => {
               </p>
             </div>
             
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={() => setShowShareModal(true)}
-                className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M15 8a3 3 0 10-2.977-2.63l-4.94 2.47a3 3 0 100 4.319l4.94 2.47a3 3 0 10.895-1.789l-4.94-2.47a3.027 3.027 0 000-.74l4.94-2.47C13.456 7.68 14.19 8 15 8z" />
-                </svg>
-                Share
-              </button>
+            {/* Enhanced User Presence Display */}
+            <div className="flex flex-col items-end">
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={() => setShowShareModal(true)}
+                  className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M15 8a3 3 0 10-2.977-2.63l-4.94 2.47a3 3 0 100 4.319l4.94 2.47a3 3 0 10.895-1.789l-4.94-2.47a3.027 3.027 0 000-.74l4.94-2.47C13.456 7.68 14.19 8 15 8z" />
+                  </svg>
+                  Share
+                </button>
+                
+                <button
+                  onClick={handleSaveAndExit}
+                  className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M9.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L7.414 9H15a1 1 0 110 2H7.414l2.293 2.293a1 1 0 010 1.414z" clipRule="evenodd" />
+                  </svg>
+                  Save & Exit
+                </button>
+              </div>
               
-              <button
-                onClick={handleSaveAndExit}
-                className="bg-white text-indigo-700 font-semibold py-2 px-4 rounded-full shadow hover:bg-indigo-50 transition-colors duration-200 flex items-center"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M9.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L7.414 9H15a1 1 0 110 2H7.414l2.293 2.293a1 1 0 010 1.414z" clipRule="evenodd" />
-                </svg>
-                Save & Exit
-              </button>
-              
-              <div className="flex items-center">
-                <div className="flex -space-x-2 mr-4 relative">
-                  {/* Current user */}
+              {/* Active Users Section */}
+              <div className="mt-3 flex items-center">
+                <div className="flex items-center mr-4">
+                  <div className="w-3 h-3 rounded-full bg-green-500 mr-2 animate-pulse"></div>
+                  <span className="text-sm font-medium">
+                    {activeViewers} {activeViewers === 1 ? 'person' : 'people'} online
+                  </span>
+                </div>
+                
+                <div className="flex -space-x-2">
+                  {/* Current User */}
                   <div 
                     className="relative bg-white text-indigo-700 w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200"
-                    title="You"
+                    title={`You (${userName})`}
                   >
                     <span className="font-bold text-sm">
                       {userName[0].toUpperCase()}
@@ -884,7 +934,7 @@ const Whiteboard = () => {
                     <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
                   </div>
                   
-                  {/* Other collaborators */}
+                  {/* Collaborators */}
                   {collaborators.slice(0, 4).map((collaborator) => (
                     <div 
                       key={collaborator.id}
@@ -904,63 +954,47 @@ const Whiteboard = () => {
                     <div 
                       className="relative bg-indigo-800 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200 cursor-pointer"
                       onClick={() => setShowCollaboratorsList(!showCollaboratorsList)}
+                      title={`${collaborators.length - 4} more collaborators`}
                     >
                       +{collaborators.length - 4}
-                      <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
                     </div>
                   )}
-                  
-                  {/* Collaborators list popover */}
-                  {showCollaboratorsList && collaborators.length > 4 && (
-                    <div className="absolute right-0 top-10 z-50 w-48 bg-white rounded-md shadow-lg py-1">
-                      <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b">
-                        Collaborators ({collaborators.length + 1})
-                      </div>
-                      <div className="max-h-60 overflow-y-auto">
-                        {/* Current user */}
-                        <div className="px-4 py-2 text-sm text-gray-700 flex items-center">
-                          <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center mr-2">
-                            {userName[0].toUpperCase()}
-                          </div>
-                          You (Owner)
-                        </div>
-                        
-                        {/* Other collaborators */}
-                        {collaborators.map((collaborator) => (
-                          <div key={collaborator.id} className="px-4 py-2 text-sm text-gray-700 flex items-center">
-                            <div 
-                              className="w-6 h-6 rounded-full flex items-center justify-center mr-2 text-white"
-                              style={{ backgroundColor: collaborator.color }}
-                            >
-                              {collaborator.name[0].toUpperCase()}
-                            </div>
-                            {collaborator.name}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-                
-                {/* User info box */}
-                <div className="bg-white/20 backdrop-blur-sm rounded-full p-1 flex items-center shadow-md">
-                  <div className="bg-white text-indigo-700 w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg border-2 border-white">
-                    {userName[0].toUpperCase()}
-                  </div>
-                  <div className="ml-3 mr-4">
-                    <p className="font-medium text-sm">You</p>
-                    <p className="text-indigo-200 text-xs">
-                      {board.userId === userId ? "Owner" : "Editor"}
-                    </p>
-                  </div>
                 </div>
               </div>
             </div>
           </div>
+          
+          {/* Collaborators List Dropdown */}
+          {showCollaboratorsList && collaborators.length > 4 && (
+            <div className="absolute right-4 mt-2 z-50 w-56 bg-white rounded-md shadow-lg py-1">
+              <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b">
+                Active Collaborators ({collaborators.length + 1})
+              </div>
+              <div className="max-h-60 overflow-y-auto">
+                <div className="px-4 py-2 text-sm text-gray-700 flex items-center">
+                  <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center mr-2">
+                    {userName[0].toUpperCase()}
+                  </div>
+                  You (Owner)
+                </div>
+                
+                {collaborators.map((collaborator) => (
+                  <div key={collaborator.id} className="px-4 py-2 text-sm text-gray-700 flex items-center">
+                    <div 
+                      className="w-6 h-6 rounded-full flex items-center justify-center mr-2 text-white"
+                      style={{ backgroundColor: collaborator.color }}
+                    >
+                      {collaborator.name[0].toUpperCase()}
+                    </div>
+                    {collaborator.name}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
       
-      {/* Share Modal */}
       {showShareModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 max-w-md w-full">
@@ -1012,7 +1046,6 @@ const Whiteboard = () => {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(shareLink);
-                    // You might want to add a toast notification here
                   }}
                   className="bg-indigo-600 text-white px-4 py-2 rounded-r-md hover:bg-indigo-700"
                 >
