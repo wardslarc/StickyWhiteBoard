@@ -45,7 +45,7 @@ const Whiteboard = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [noteCreationColor, setNoteCreationColor] = useState<string>("#ffcc80");
   const [collaborators, setCollaborators] = useState<{id: string, name: string, color: string}[]>([]);
-  const [cursors, setCursors] = useState<{[key: string]: Position}>({});
+  const [cursors, setCursors] = useState<{[key: string]: any}>({});
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareLink, setShareLink] = useState("");
   const [shareEmail, setShareEmail] = useState("");
@@ -65,6 +65,26 @@ const Whiteboard = () => {
   const getUserColor = (id: string) => {
     const hue = parseInt(id.slice(-3), 16) % 360;
     return `hsl(${hue}, 70%, 60%)`;
+  };
+
+  // Throttle function to limit how often a function is called
+  const throttle = (func: (...args: any[]) => void, limit: number) => {
+    let lastFunc: ReturnType<typeof setTimeout>;
+    let lastRan: number;
+    return function(this: any, ...args: any[]) {
+      if (!lastRan) {
+        func.apply(this, args);
+        lastRan = Date.now();
+      } else {
+        clearTimeout(lastFunc);
+        lastFunc = setTimeout(() => {
+          if ((Date.now() - lastRan) >= limit) {
+            func.apply(this, args);
+            lastRan = Date.now();
+          }
+        }, limit - (Date.now() - lastRan));
+      }
+    };
   };
 
   // Initialize user and board data
@@ -99,101 +119,152 @@ const Whiteboard = () => {
     return unsubscribe;
   }, [boardId]);
 
-  // Setup presence tracking
+  // Enhanced presence tracking
   useEffect(() => {
     if (!boardId || !userId) return;
     
     const presenceRef = ref(rtdb, `presence/${boardId}/${userId}`);
-    set(presenceRef, {
+    
+    const presenceData = {
       userId,
       name: userName,
+      color: getUserColor(userId),
+      lastActive: Date.now(),
+      status: 'online'
+    };
+    
+    set(presenceRef, presenceData);
+    
+    onDisconnect(presenceRef).update({
+      status: 'offline',
       lastActive: Date.now()
     });
     
-    onDisconnect(presenceRef).remove();
+    const heartbeatInterval = setInterval(() => {
+      update(presenceRef, {
+        lastActive: Date.now()
+      });
+    }, 30000);
     
     const collaboratorsRef = ref(rtdb, `presence/${boardId}`);
     const unsubscribeCollaborators = onValue(collaboratorsRef, (snapshot) => {
       const users = snapshot.val() || {};
-      setActiveViewers(Object.keys(users).length);
       
-      const collaboratorsData = Object.entries(users).map(([id, userData]: [string, any]) => ({
+      const activeUsers = Object.entries(users).filter(([_, userData]: [string, any]) => {
+        return userData.status !== 'offline' && 
+               Date.now() - userData.lastActive < 60000;
+      });
+      
+      setActiveViewers(activeUsers.length);
+      
+      const collaboratorsData = activeUsers.map(([_, userData]: [string, any]) => ({
         id: userData.userId,
         name: userData.name,
-        color: getUserColor(userData.userId)
+        color: userData.color || getUserColor(userData.userId)
       })).filter(user => user.id !== userId);
       
       setCollaborators(collaboratorsData);
     });
     
     return () => {
+      clearInterval(heartbeatInterval);
       remove(presenceRef);
       off(collaboratorsRef);
     };
   }, [boardId, userId, rtdb, userName]);
 
-  // Setup cursor tracking
+  // Enhanced cursor tracking
   useEffect(() => {
     if (!boardId || !userId || !whiteboardRef.current) return;
     
     const cursorRef = ref(rtdb, `cursors/${boardId}/${userId}`);
+    
     const handleMouseMove = (e: MouseEvent) => {
       if (!whiteboardRef.current) return;
       const rect = whiteboardRef.current.getBoundingClientRect();
       update(cursorRef, {
         x: e.clientX - rect.left,
-        y: e.clientY - rect.top
+        y: e.clientY - rect.top,
+        name: userName,
+        color: getUserColor(userId),
+        timestamp: Date.now(),
+        tool: selectedTool
       });
     };
     
-    window.addEventListener('mousemove', handleMouseMove);
+    const throttledMouseMove = throttle(handleMouseMove, 50);
+    window.addEventListener('mousemove', throttledMouseMove);
+    
     const cursorsRef = ref(rtdb, `cursors/${boardId}`);
     const unsubscribeCursors = onValue(cursorsRef, (snapshot) => {
-      setCursors(snapshot.val() || {});
+      const allCursors = snapshot.val() || {};
+      
+      const activeCursors = Object.entries(allCursors).reduce((acc, [id, cursorData]: [string, any]) => {
+        if (Date.now() - cursorData.timestamp < 3000) {
+          acc[id] = cursorData;
+        }
+        return acc;
+      }, {} as Record<string, any>);
+      
+      setCursors(activeCursors);
     });
     
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mousemove', throttledMouseMove);
       remove(cursorRef);
       off(cursorsRef);
     };
-  }, [boardId, userId, rtdb]);
+  }, [boardId, userId, rtdb, userName, selectedTool]);
 
   // Real-time position updates for sticky notes
-  const updateNotePosition = useCallback((id: string, newPos: Position) => {
-    // Update local state immediately
+  const updateNotePosition = useCallback(async (id: string, newPos: Position) => {
+    // Update local state immediately for responsiveness
     setNotePositions(prev => ({ ...prev, [id]: newPos }));
     
-    // Update Realtime DB for instant sync
-    const positionRef = ref(rtdb, `notePositions/${boardId}/${id}`);
-    update(positionRef, {
-      x: newPos.x,
-      y: newPos.y,
-      updatedBy: userId,
-      timestamp: Date.now()
-    });
-
-    // Update Firestore for persistence
-    updateDoc(doc(db, "notes", id), {
-      position: newPos,
-      updatedAt: serverTimestamp(),
-      lastUpdatedBy: userId
-    }).catch(console.error);
+    try {
+      // Update both Firestore and Realtime DB in parallel
+      await Promise.all([
+        // Firestore for persistence
+        updateDoc(doc(db, "notes", id), {
+          position: newPos,
+          updatedAt: serverTimestamp(),
+          lastUpdatedBy: userId
+        }),
+        
+        // Realtime DB for instant sync
+        update(ref(rtdb, `notePositions/${boardId}/${id}`), {
+          x: newPos.x,
+          y: newPos.y,
+          updatedBy: userId,
+          timestamp: serverTimestamp()
+        })
+      ]);
+    } catch (error) {
+      console.error("Error updating note position:", error);
+      // Revert local state if update fails
+      setNotePositions(prev => ({ ...prev, [id]: prev[id] }));
+    }
   }, [userId, boardId, rtdb]);
 
   // Listen for real-time position changes
   useEffect(() => {
-    if (!boardId) return;
+    if (!boardId || !whiteboardRef.current) return;
     
     const positionsRef = ref(rtdb, `notePositions/${boardId}`);
     const unsubscribe = onValue(positionsRef, (snapshot) => {
       const positions = snapshot.val() || {};
+      const boardRect = whiteboardRef.current?.getBoundingClientRect();
+      
       setNotePositions(prev => {
         const newPositions = {...prev};
         Object.entries(positions).forEach(([id, posData]: [string, any]) => {
           // Only update if we're not the ones moving this note
           if (posData.updatedBy !== userId) {
-            newPositions[id] = { x: posData.x, y: posData.y };
+            // Convert to relative coordinates if needed
+            newPositions[id] = { 
+              x: posData.x, 
+              y: posData.y 
+            };
           }
         });
         return newPositions;
@@ -201,7 +272,7 @@ const Whiteboard = () => {
     });
     
     return () => off(positionsRef);
-  }, [boardId, userId, rtdb]);
+  }, [boardId, userId, rtdb, whiteboardRef]);
 
   // Load notes with initial positions
   useEffect(() => {
@@ -216,6 +287,8 @@ const Whiteboard = () => {
         snapshot.forEach((doc) => {
           const data = doc.data();
           const serverPosition = data.position || { x: 50, y: 50 };
+          
+          // Initialize position from Firestore
           initialPositions[doc.id] = serverPosition;
 
           notesData.push({
@@ -229,7 +302,17 @@ const Whiteboard = () => {
         });
 
         setNotes(notesData);
-        setNotePositions(prev => ({ ...prev, ...initialPositions }));
+        
+        // Merge with any existing realtime positions
+        setNotePositions(prev => {
+          const merged = {...prev};
+          Object.entries(initialPositions).forEach(([id, pos]) => {
+            if (!merged[id] || merged[id].updatedBy !== userId) {
+              merged[id] = pos;
+            }
+          });
+          return merged;
+        });
 
         if (notesData.length > 0) {
           setHighestZIndex(Math.max(...notesData.map(note => note.zIndex)));
@@ -238,6 +321,30 @@ const Whiteboard = () => {
     );
 
     return notesUnsubscribe;
+  }, [boardId, userId]);
+
+  // Cleanup positions when notes are deleted
+  useEffect(() => {
+    if (!boardId) return;
+
+    const handleNoteDeletions = onSnapshot(
+      query(collection(db, "notes"), where("boardId", "==", boardId)),
+      (snapshot) => {
+        const currentNoteIds = new Set(snapshot.docs.map(doc => doc.id));
+        
+        setNotePositions(prev => {
+          const newPositions = {...prev};
+          Object.keys(prev).forEach(id => {
+            if (!currentNoteIds.has(id)) {
+              delete newPositions[id];
+            }
+          });
+          return newPositions;
+        });
+      }
+    );
+
+    return () => handleNoteDeletions();
   }, [boardId]);
 
   // Load drawing paths
@@ -316,16 +423,14 @@ const Whiteboard = () => {
         lastUpdatedBy: userId
       });
       
-      // Initialize realtime position
       const positionRef = ref(rtdb, `notePositions/${boardId}/${newNoteRef.id}`);
       set(positionRef, {
         x: initialPosition.x,
         y: initialPosition.y,
         updatedBy: userId,
-        timestamp: Date.now()
+        timestamp: serverTimestamp()
       });
       
-      // Update local state
       setNotePositions(prev => ({ ...prev, [newNoteRef.id]: initialPosition }));
     } catch (error) {
       console.error("Error adding note:", error);
@@ -336,11 +441,9 @@ const Whiteboard = () => {
   const deleteNote = async (id: string) => {
     try {
       await deleteDoc(doc(db, "notes", id));
-      // Remove from realtime positions
       const positionRef = ref(rtdb, `notePositions/${boardId}/${id}`);
       remove(positionRef).catch(console.error);
       
-      // Update local state
       setNotePositions(prev => {
         const newPositions = {...prev};
         delete newPositions[id];
@@ -743,42 +846,39 @@ const Whiteboard = () => {
   );
 
   const drawCollaboratorCursors = (ctx: CanvasRenderingContext2D) => {
-    Object.entries(cursors).forEach(([collaboratorId, position]) => {
+    Object.entries(cursors).forEach(([collaboratorId, cursorData]) => {
       if (collaboratorId === userId) return;
       
-      const collaborator = collaborators.find(c => c.id === collaboratorId);
-      if (!collaborator) return;
+      const { x, y, name, color } = cursorData;
+      const collaborator = collaborators.find(c => c.id === collaboratorId) || {
+        id: collaboratorId,
+        name: name || `User${collaboratorId.slice(0, 5)}`,
+        color: color || getUserColor(collaboratorId)
+      };
       
+      // Draw cursor
       ctx.shadowColor = collaborator.color;
       ctx.shadowBlur = 15;
       ctx.fillStyle = collaborator.color;
       ctx.beginPath();
-      ctx.arc(position.x, position.y, 8, 0, Math.PI * 2);
+      ctx.arc(x, y, 8, 0, Math.PI * 2);
       ctx.fill();
       
       ctx.shadowColor = 'transparent';
       ctx.fillStyle = 'white';
       ctx.beginPath();
-      ctx.arc(position.x, position.y, 4, 0, Math.PI * 2);
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
       ctx.fill();
       
-      ctx.strokeStyle = 'white';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(position.x, position.y - 15);
-      ctx.lineTo(position.x, position.y + 15);
-      ctx.moveTo(position.x - 15, position.y);
-      ctx.lineTo(position.x + 15, position.y);
-      ctx.stroke();
-      
+      // Draw name tag
       ctx.font = "bold 12px sans-serif";
       const textWidth = ctx.measureText(collaborator.name).width;
       const tagPadding = 8;
       const tagHeight = 20;
-      const tagY = position.y - 35;
+      const tagY = y - 35;
       
       ctx.fillStyle = collaborator.color;
-      const tagX = position.x - textWidth/2 - tagPadding;
+      const tagX = x - textWidth/2 - tagPadding;
       ctx.beginPath();
       ctx.roundRect(tagX, tagY, textWidth + tagPadding*2, tagHeight, 10);
       ctx.fill();
@@ -786,14 +886,40 @@ const Whiteboard = () => {
       ctx.fillStyle = "white";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(collaborator.name, position.x, tagY + tagHeight/2);
+      ctx.fillText(collaborator.name, x, tagY + tagHeight/2);
       
+      // Draw connecting line
       ctx.strokeStyle = collaborator.color;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(position.x, position.y - 8);
-      ctx.lineTo(position.x, tagY + tagHeight);
+      ctx.moveTo(x, y - 8);
+      ctx.lineTo(x, tagY + tagHeight);
       ctx.stroke();
+      
+      // Draw action indicator based on tool
+      if (cursorData.tool) {
+        ctx.fillStyle = collaborator.color;
+        ctx.beginPath();
+        ctx.arc(x, y, 12, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = 'white';
+        ctx.font = "bold 10px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        
+        let toolSymbol = '';
+        switch(cursorData.tool) {
+          case 'select': toolSymbol = '↔'; break;
+          case 'brush': toolSymbol = '✏️'; break;
+          case 'eraser': toolSymbol = '✖'; break;
+          case 'rectangle': toolSymbol = '□'; break;
+          case 'circle': toolSymbol = '○'; break;
+          default: toolSymbol = '•';
+        }
+        
+        ctx.fillText(toolSymbol, x, y);
+      }
     });
   };
 
@@ -889,7 +1015,6 @@ const Whiteboard = () => {
               </p>
             </div>
             
-            {/* Enhanced User Presence Display */}
             <div className="flex flex-col items-end">
               <div className="flex items-center space-x-4">
                 <button
@@ -913,7 +1038,6 @@ const Whiteboard = () => {
                 </button>
               </div>
               
-              {/* Active Users Section */}
               <div className="mt-3 flex items-center">
                 <div className="flex items-center mr-4">
                   <div className="w-3 h-3 rounded-full bg-green-500 mr-2 animate-pulse"></div>
@@ -923,7 +1047,6 @@ const Whiteboard = () => {
                 </div>
                 
                 <div className="flex -space-x-2">
-                  {/* Current User */}
                   <div 
                     className="relative bg-white text-indigo-700 w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200"
                     title={`You (${userName})`}
@@ -934,7 +1057,6 @@ const Whiteboard = () => {
                     <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
                   </div>
                   
-                  {/* Collaborators */}
                   {collaborators.slice(0, 4).map((collaborator) => (
                     <div 
                       key={collaborator.id}
@@ -949,7 +1071,6 @@ const Whiteboard = () => {
                     </div>
                   ))}
                   
-                  {/* More collaborators indicator */}
                   {collaborators.length > 4 && (
                     <div 
                       className="relative bg-indigo-800 text-white w-8 h-8 rounded-full flex items-center justify-center border-2 border-white hover:z-10 hover:scale-110 transition-transform duration-200 cursor-pointer"
@@ -964,7 +1085,6 @@ const Whiteboard = () => {
             </div>
           </div>
           
-          {/* Collaborators List Dropdown */}
           {showCollaboratorsList && collaborators.length > 4 && (
             <div className="absolute right-4 mt-2 z-50 w-56 bg-white rounded-md shadow-lg py-1">
               <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b">
